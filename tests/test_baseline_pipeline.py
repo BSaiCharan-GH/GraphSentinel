@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from src.graph.graph_builder import build_similarity_graph
 from src.models.fraud_model import build_evaluation_frame, load_trained_model
 
 
@@ -27,3 +28,14 @@ def test_validation_split_is_class_balanced_enough() -> None:
     assert train["Class"].nunique() == 2
     assert validation["Class"].nunique() == 2
     assert len(validation) > 0
+
+
+def test_similarity_graph_uses_feature_space_only() -> None:
+    artifact = load_trained_model()
+    frame = build_evaluation_frame().head(200)
+    graph = build_similarity_graph(frame, artifact["feature_columns"], k_neighbors=5, max_nodes=100)
+    assert graph["nodes"]
+    assert graph["edges"]
+    assert all(edge["source"] != edge["target"] for edge in graph["edges"])
+    assert all(edge["source"] in {node["id"] for node in graph["nodes"]} for edge in graph["edges"])
+    assert all(edge["target"] in {node["id"] for node in graph["nodes"]} for edge in graph["edges"])

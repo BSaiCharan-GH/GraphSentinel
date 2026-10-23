@@ -67,7 +67,7 @@ def load_raw_dataset() -> pd.DataFrame:
 def get_prediction_table() -> pd.DataFrame:
     try:
         return build_evaluation_frame()
-    except FileNotFoundError:
+    except (FileNotFoundError, ValueError):
         return pd.DataFrame()
 
 
@@ -83,10 +83,51 @@ def render_kpi_card(label: str, value: str, accent: str = "#E2E8F0") -> None:
     )
 
 
+def render_setup_status() -> None:
+    processed_dir = ROOT / "data" / "processed"
+    dataset_ready = RAW_DATA_PATH.exists()
+    model_ready = (processed_dir / "fraud_model.joblib").exists()
+    summary_ready = (processed_dir / "evaluation_summary.json").exists()
+
+    if not dataset_ready or not model_ready:
+        with st.container():
+            st.warning("Repository setup required before review workflows can run.")
+            st.code("python src/data/validate_dataset.py\npython src/data/split_dataset.py\npython src/models/train_baseline.py")
+            st.markdown(
+                """
+                <div style="padding: 14px 16px; border:1px solid rgba(148,163,184,0.2); border-radius: 12px; background: rgba(15,23,42,0.82);">
+                    <div style="font-size: 11px; color: #94A3B8; letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 8px;">Setup checklist</div>
+                    <div style="color: #E2E8F0; line-height: 1.7;">
+                        • Dataset present: %s<br>
+                        • Model artifacts present: %s<br>
+                        • Held-out evaluation summary: %s
+                    </div>
+                </div>
+                """ % (
+                    "Yes" if dataset_ready else "No",
+                    "Yes" if model_ready else "No",
+                    "Yes" if summary_ready else "No",
+                ),
+                unsafe_allow_html=True,
+            )
+
+
 def render_overview() -> None:
-    raw_df = load_raw_dataset()
-    predictions = get_prediction_table()
-    model_artifact = load_trained_model()
+    try:
+        raw_df = load_raw_dataset()
+    except FileNotFoundError:
+        render_setup_status()
+        st.warning("The raw dataset is not available yet. Place the credit-card CSV in data/raw/creditcard.csv and rerun the validation step.")
+        return
+
+    try:
+        predictions = get_prediction_table()
+        model_artifact = load_trained_model()
+    except (FileNotFoundError, ValueError):
+        render_setup_status()
+        st.info("No trained model output is available yet. Run the baseline training step to populate evaluation metrics.")
+        return
+
     summary = model_artifact.get("summary") or {}
     test_summary = summary.get("test", {})
 
@@ -95,6 +136,7 @@ def render_overview() -> None:
     fraud_rate = (fraud_cases / total_transactions) if total_transactions else 0.0
 
     if predictions.empty:
+        render_setup_status()
         st.info("No trained model output is available yet. Run the baseline training step to populate evaluation metrics.")
         return
 
@@ -241,12 +283,17 @@ def render_feature_importance_chart(explanation: pd.DataFrame, top_n: int = 8) -
 
 
 def render_transaction_explorer() -> None:
-    predictions = get_prediction_table()
+    try:
+        predictions = get_prediction_table()
+        model_artifact = load_trained_model()
+    except (FileNotFoundError, ValueError):
+        st.info("Transaction data is not available yet. Train the baseline model first.")
+        return
+
     if predictions.empty:
         st.info("Transaction data is not available yet. Train the baseline model first.")
         return
 
-    model_artifact = load_trained_model()
     feature_columns = model_artifact["feature_columns"]
 
     with st.sidebar:
@@ -329,12 +376,17 @@ def render_transaction_explorer() -> None:
 
 
 def render_graph_intelligence() -> None:
-    predictions = get_prediction_table()
+    try:
+        predictions = get_prediction_table()
+        model_artifact = load_trained_model()
+    except (FileNotFoundError, ValueError):
+        st.info("Graph construction depends on the evaluated transaction frame. Train the baseline model first.")
+        return
+
     if predictions.empty:
         st.info("Graph construction depends on the evaluated transaction frame. Train the baseline model first.")
         return
 
-    model_artifact = load_trained_model()
     feature_columns = model_artifact["feature_columns"]
 
     with st.sidebar:
@@ -454,12 +506,17 @@ def build_risk_review_payload(
 
 
 def render_fraud_investigation() -> None:
-    predictions = get_prediction_table()
+    try:
+        predictions = get_prediction_table()
+        model_artifact = load_trained_model()
+    except (FileNotFoundError, ValueError):
+        st.info("Fraud investigation requires evaluated predictions. Train the baseline model first.")
+        return
+
     if predictions.empty:
         st.info("Fraud investigation requires evaluated predictions. Train the baseline model first.")
         return
 
-    model_artifact = load_trained_model()
     feature_columns = model_artifact["feature_columns"]
     flagged = predictions.loc[predictions["model_prediction"] == 1].sort_values("model_probability", ascending=False)
 

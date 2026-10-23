@@ -27,17 +27,27 @@ The dataset contains anonymized PCA-transformed features. It does not include re
 
 ## Setup
 
-1. Create and activate the project virtual environment.
+1. Create and activate the project virtual environment:
+   python -m venv .venv
+   .\.venv\Scripts\Activate.ps1
 2. Install dependencies:
-   pip install -r requirements.txt
+   python -m pip install -r requirements.txt
 3. Validate the raw dataset:
    python src/data/validate_dataset.py
 4. Create train/validation/test splits:
    python src/data/split_dataset.py
 5. Train the fraud baseline:
    python src/models/train_baseline.py
-6. Launch the dashboard:
+6. Run the test suite:
+   python -m pytest -q
+7. Launch the dashboard:
    streamlit run app.py
+
+## Expected runtime behavior
+
+- If data/raw/creditcard.csv is missing, the app shows a friendly setup message instead of crashing.
+- If the processed model artifacts are absent, the app prompts the user to train the baseline before exploring predictions.
+- Training and evaluation remain reproducible because the selected validation threshold and held-out test metrics are saved to data/processed/evaluation_summary.json.
 
 ## Repository structure
 
