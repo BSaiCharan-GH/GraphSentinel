@@ -25,7 +25,9 @@ Expected columns:
 
 The dataset contains anonymized PCA-transformed features. It does not include real customers, merchants, cards, or payment network edges, so any graph is explicitly treated as an inferred analytical relationship rather than a real-world payment graph.
 
-## Setup
+## Local development setup (maintainer)
+
+Visitors to a deployed public demo only need its published Streamlit URL. Dataset access and secrets are configured once by the app owner; reviewers do not upload files, provide credentials, or run commands.
 
 1. Create and activate the project virtual environment:
    python -m venv .venv
@@ -47,17 +49,18 @@ For a clean checkout, use the commands in that order after placing `creditcard.c
 
 ## Expected runtime behavior
 
-- If data/raw/creditcard.csv is missing, the app shows a friendly setup message instead of crashing.
-- If the processed model artifacts are absent, the app prompts the user to train the baseline before exploring predictions.
+- The public demo does not ask visitors to upload files, provide credentials, or run commands.
+- On application startup, the app retrieves the required processed splits and matching model artifacts from configured private storage, validates them, and prepares transaction predictions before rendering the data-dependent pages.
+- Downloaded artifacts use the Hugging Face Hub cache; loaded predictions and the model are cached across Streamlit reruns. The app does not retrain.
+- If artifact storage is unavailable or artifacts fail validation, the app records the error in the Streamlit application logs and shows a user-safe fallback. Transaction pages do not show fabricated or empty placeholder results; Methodology & Data remains available.
 - Training and evaluation remain reproducible because the selected validation threshold and held-out test metrics are saved to data/processed/evaluation_summary.json.
 - The operating threshold is selected by maximizing validation-set F1; when multiple thresholds tie, the higher threshold is preferred. The held-out test set is used only for final metric reporting.
-- Opening the dashboard does not train a model implicitly. Missing model artifacts display setup guidance; run the documented training command to create them.
 - Model Lab reports confusion matrix, precision, recall, F1, ROC-AUC, PR-AUC, ROC/PR curves, and threshold trade-offs when required outputs are present. Threshold analysis uses validation predictions; final test metrics use the held-out test split.
 - The dashboard includes the Overview, Transaction Explorer, Graph Intelligence, Fraud Investigation, Model Lab, and Methodology & Data pages.
 
 ## Streamlit Community Cloud deployment
 
-The raw dataset and generated split CSVs are intentionally excluded from Git. The data-facing pages need `train.csv`, `validation.csv`, and `test.csv` at runtime; inference and evaluation also require a matching `fraud_model.joblib` and `evaluation_summary.json`. The Methodology & Data page is available without these artifacts.
+The raw dataset and generated split CSVs are intentionally excluded from Git. The data-facing pages need `train.csv`, `validation.csv`, and `test.csv` at runtime; inference and evaluation also require a matching `fraud_model.joblib` and `evaluation_summary.json`. These are developer-only deployment prerequisites; visitors do not configure or upload them. The Methodology & Data page remains available if deployment data is unavailable.
 
 This app uses a private Hugging Face Hub **dataset repository** as external artifact storage. Upload only these files from `data/processed/`, preserving the `processed/` folder:
 
@@ -71,7 +74,7 @@ processed/evaluation_summary.json
 
 Do not upload `data/raw/creditcard.csv`. After artifact updates, run `python src/models/train_baseline.py` locally so the summary contains the SHA-256 checksum of its matching model file, then upload the model and summary together. Never edit the checksum by hand.
 
-Configure the deployed Streamlit app under **App settings → Secrets**:
+As the app owner, configure the deployed Streamlit app once under **App settings → Secrets**:
 
 ```toml
 [artifacts]
@@ -80,11 +83,13 @@ token = "YOUR_READ_ONLY_HUGGING_FACE_TOKEN"
 revision = "main"
 ```
 
-Create a private dataset repository in your Hugging Face account and create a read-only token with access to it. Replace the example values yourself; no repository, URL, or token is embedded in this project. Keep the token only in Streamlit Secrets. The app fetches requested artifacts into the Hugging Face cache once per process; it does not download the raw dataset or retrain on Streamlit reruns. The three split CSVs total roughly 155 MB, so first use requires network transfer and sufficient app memory to load and score the splits.
+`repo_id` should normally be `account/repository`; a dataset URL such as `https://huggingface.co/datasets/account/repository` is also accepted. Create a private dataset repository and a read-only token with access to it. Keep the token only in Streamlit Secrets; it is never shown in the application or committed to Git. The app downloads and validates the complete required artifact bundle on first startup, then reuses the Hugging Face Hub disk cache and Streamlit's in-process caches across reruns. It does not download the raw dataset or retrain. The three split CSVs total roughly 155 MB, so the host needs enough disk, network transfer, and memory to load and score them.
+
+After setting the secrets and uploading the artifact bundle, reboot the app once and review its logs. Successful first-load validation is required before the public demo is ready. If startup fails, the technical cause is written to application logs while visitors see a safe fallback instead of invented results.
 
 For local use, local `data/processed/` files are preferred. Alternatively set `GRAPHSENTINEL_PROCESSED_DIR` to a directory containing the five files above. `GRAPHSENTINEL_ARTIFACT_REPO`, `GRAPHSENTINEL_HF_TOKEN`, and `GRAPHSENTINEL_ARTIFACT_REVISION` may be used instead of Streamlit Secrets for non-Cloud environments.
 
-After pushing the application changes, use **Manage app → Reboot** (or wait for the repository sync/redeploy) in Streamlit Community Cloud. Verify that Overview loads transaction statistics, Model Lab displays split-based metrics, and Transaction Explorer displays rows. If artifact loading fails, inspect the app logs and verify the repo ID, read permission, revision, file paths, model checksum, and available memory. A successful local test does not itself verify a hosted deployment.
+After pushing application changes, use **Manage app → Reboot** (or wait for repository sync/redeploy) in Streamlit Community Cloud. As the app owner, verify in the hosted app that Overview displays transaction statistics, Transaction Explorer displays records, Graph Intelligence renders inferred feature-similarity edges, Fraud Investigation loads cases and signed explanations, and Model Lab displays split-based metrics. If initialization fails, inspect app logs and verify the repository ID, read permission, revision, file paths, model checksum, and available memory. A successful local test does not itself verify the hosted deployment.
 
 ## Repository structure
 

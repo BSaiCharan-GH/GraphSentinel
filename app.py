@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 import numpy as np
 import pandas as pd
@@ -18,12 +19,18 @@ from sklearn.metrics import (
 )
 
 from src.graph.graph_builder import build_similarity_graph
-from src.data.artifact_store import ArtifactStoreError, configure_from_mapping
+from src.data.artifact_store import (
+    ArtifactStoreError,
+    configuration_version,
+    configure_from_mapping,
+)
 from src.models.fraud_model import (
     build_evaluation_frame,
     get_feature_contributions,
     load_trained_model,
 )
+
+LOGGER = logging.getLogger("graphsentinel.deployment")
 
 def _risk_band(value: float) -> str:
     if value < 0.2:
@@ -58,14 +65,36 @@ def render_sidebar_signal(predictions: pd.DataFrame) -> None:
     )
 
 
-@st.cache_data(show_spinner=False)
-def get_prediction_table() -> pd.DataFrame:
+@st.cache_resource(show_spinner=False)
+def get_prediction_table(config_version: int) -> pd.DataFrame:
     return build_evaluation_frame()
 
 
 @st.cache_resource(show_spinner=False)
-def get_model_artifact() -> dict:
+def get_model_artifact(config_version: int) -> dict:
     return load_trained_model(require_splits=True)
+
+
+@st.cache_data(show_spinner=False)
+def initialize_demo_data(config_version: int) -> str | None:
+    try:
+        get_model_artifact(config_version)
+        get_prediction_table(config_version)
+    except (
+        ArtifactStoreError,
+        FileNotFoundError,
+        ValueError,
+        OSError,
+        ImportError,
+        pd.errors.ParserError,
+        MemoryError,
+    ) as error:
+        LOGGER.exception("GraphSentinel demo initialization failed: %s", error)
+        return (
+            "The demo’s transaction analysis is temporarily unavailable. "
+            "The Methodology & Data page remains available."
+        )
+    return None
 
 
 @st.cache_data(show_spinner=False)
@@ -96,26 +125,23 @@ def render_kpi_card(label: str, value: str, accent: str = "#E2E8F0") -> None:
 
 
 def render_setup_status() -> None:
-    st.info(
-        "Transaction analysis needs the train.csv, validation.csv, test.csv, "
-        "fraud_model.joblib, and evaluation_summary.json files under a local "
-        "processed/ directory or the configured external artifact repository."
-    )
     st.markdown(
-        "For Streamlit Community Cloud, configure the private artifact dataset "
-        "in **App settings → Secrets**. See the README deployment instructions."
+        "Please try again later. The Methodology & Data page is available without "
+        "transaction data."
     )
 
 
 def show_artifact_error(error: Exception) -> None:
-    st.error(f"Transaction artifacts are unavailable: {error}")
+    LOGGER.exception("GraphSentinel page could not load transaction artifacts: %s", error)
+    st.error("Transaction analysis is temporarily unavailable.")
     render_setup_status()
 
 
 def render_overview() -> None:
     try:
-        predictions = get_prediction_table()
-        model_artifact = get_model_artifact()
+        config_version = configuration_version()
+        predictions = get_prediction_table(config_version)
+        model_artifact = get_model_artifact(config_version)
     except (ArtifactStoreError, FileNotFoundError, ValueError) as error:
         show_artifact_error(error)
         return
@@ -288,8 +314,9 @@ def render_feature_importance_chart(explanation: pd.DataFrame, top_n: int = 8) -
 
 def render_transaction_explorer() -> None:
     try:
-        predictions = get_prediction_table()
-        model_artifact = get_model_artifact()
+        config_version = configuration_version()
+        predictions = get_prediction_table(config_version)
+        model_artifact = get_model_artifact(config_version)
     except (ArtifactStoreError, FileNotFoundError, ValueError) as error:
         show_artifact_error(error)
         return
@@ -397,8 +424,9 @@ def render_transaction_explorer() -> None:
 
 def render_graph_intelligence() -> None:
     try:
-        predictions = get_prediction_table()
-        model_artifact = get_model_artifact()
+        config_version = configuration_version()
+        predictions = get_prediction_table(config_version)
+        model_artifact = get_model_artifact(config_version)
     except (ArtifactStoreError, FileNotFoundError, ValueError) as error:
         show_artifact_error(error)
         return
@@ -552,8 +580,9 @@ def build_risk_review_payload(
 
 def render_fraud_investigation() -> None:
     try:
-        predictions = get_prediction_table()
-        model_artifact = get_model_artifact()
+        config_version = configuration_version()
+        predictions = get_prediction_table(config_version)
+        model_artifact = get_model_artifact(config_version)
     except (ArtifactStoreError, FileNotFoundError, ValueError) as error:
         show_artifact_error(error)
         return
@@ -670,8 +699,9 @@ def render_model_lab() -> None:
         unsafe_allow_html=True,
     )
     try:
-        predictions = get_prediction_table()
-        model_artifact = get_model_artifact()
+        config_version = configuration_version()
+        predictions = get_prediction_table(config_version)
+        model_artifact = get_model_artifact(config_version)
     except (ArtifactStoreError, FileNotFoundError, ValueError) as error:
         show_artifact_error(error)
         return
@@ -908,12 +938,17 @@ def render_methodology_data() -> None:
 
 def main() -> None:
     st.set_page_config(page_title="GraphSentinel | Fraud Intelligence", page_icon="🛡️", layout="wide")
+    configuration_error: str | None = None
     try:
         configure_from_mapping(st.secrets)
     except StreamlitSecretNotFoundError:
         configure_from_mapping({})
-    except ValueError as error:
-        st.error(f"Invalid artifact storage configuration: {error}")
+    except (TypeError, ValueError) as error:
+        LOGGER.exception("Invalid GraphSentinel artifact configuration: %s", error)
+        configuration_error = (
+            "The demo’s transaction analysis is temporarily unavailable. "
+            "The Methodology & Data page remains available."
+        )
     st.markdown(
         """
         <style>
@@ -983,6 +1018,25 @@ def main() -> None:
         index=0,
         key="main_navigation",
     )
+
+    if configuration_error:
+        initialization_error = configuration_error
+    else:
+        with st.spinner("Preparing the transaction risk demo…"):
+            initialization_error = initialize_demo_data(configuration_version())
+
+    if initialization_error:
+        st.warning(initialization_error)
+        if nav == "Methodology & Data":
+            st.title("Methodology & Data")
+            render_methodology_data()
+        else:
+            st.info(
+                "No transaction rows, scores, metrics, or graph relationships are being "
+                "shown until the demo data is available. Select **Methodology & Data** "
+                "in the sidebar to explore the implementation."
+            )
+        return
 
     if nav == "Overview":
         st.title("Overview")
