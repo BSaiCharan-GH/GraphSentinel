@@ -28,7 +28,22 @@ def build_similarity_graph(
     sample_size = min(max_nodes, len(working))
     sample = working.sample(n=sample_size, random_state=random_state)
 
-    numeric_cols = [col for col in feature_columns if col in sample.columns]
+    non_feature_columns = {
+        "Class",
+        "ground_truth_label",
+        "transaction_id",
+        "split",
+        "model_probability",
+        "model_prediction",
+        "risk_category",
+    }
+    numeric_cols = [
+        col
+        for col in feature_columns
+        if col in sample.columns
+        and col not in non_feature_columns
+        and pd.api.types.is_numeric_dtype(sample[col])
+    ]
     if not numeric_cols:
         return {"nodes": [], "edges": [], "message": "No usable numeric feature columns available."}
 

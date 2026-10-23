@@ -12,6 +12,7 @@ from sklearn.metrics import (
     average_precision_score,
     precision_recall_curve,
     precision_recall_fscore_support,
+    roc_auc_score,
 )
 from sklearn.preprocessing import StandardScaler
 
@@ -73,10 +74,12 @@ def _summarize_metrics(y_true: np.ndarray, probabilities: np.ndarray, threshold:
         zero_division=0,
     )
     pr_auc = average_precision_score(y_true, probabilities)
+    roc_auc = roc_auc_score(y_true, probabilities)
     return {
         "precision": float(precision),
         "recall": float(recall),
         "f1": float(f1),
+        "roc_auc": float(roc_auc),
         "pr_auc": float(pr_auc),
         "selected_threshold": float(threshold),
         "flagged_transactions": int(predictions.sum()),
@@ -241,17 +244,40 @@ def build_evaluation_frame() -> pd.DataFrame:
 
 
 def get_feature_contributions(model: LogisticRegression, scaler, row: pd.Series, feature_columns: list[str]) -> pd.DataFrame:
+    """Return signed per-feature contributions to the fraud-class logit."""
     values = row[feature_columns].to_numpy(dtype=float)
-    scaled_values = scaler.transform(values.reshape(1, -1))[0]
-    coefficients = model.coef_[0]
-    contributions = np.abs(coefficients * scaled_values)
+    classes = np.asarray(model.classes_)
+    fraud_class_index = np.flatnonzero(classes == 1)
+    if fraud_class_index.size != 1:
+        raise ValueError("Feature contributions require a model with fraud class label 1.")
+    if model.coef_.shape[0] != 1 or len(classes) != 2:
+        raise ValueError("Feature contributions currently support binary linear models only.")
+    if model.coef_.shape[1] != len(feature_columns):
+        raise ValueError("Model coefficient order does not match the requested feature columns.")
+    if getattr(scaler, "n_features_in_", len(feature_columns)) != len(feature_columns):
+        raise ValueError("Scaler feature order does not match the requested feature columns.")
+    for fitted_names in (
+        getattr(model, "feature_names_in_", None),
+        getattr(scaler, "feature_names_in_", None),
+    ):
+        if fitted_names is not None and list(fitted_names) != feature_columns:
+            raise ValueError("Requested feature order does not match the fitted model and scaler.")
+
+    feature_frame = pd.DataFrame([values], columns=feature_columns)
+    scaled_values = np.asarray(scaler.transform(feature_frame))[0]
+    # For sklearn's binary linear estimators, coef_[0] describes classes_[1].
+    # Reverse its sign when fraud (label 1) is classes_[0].
+    orientation = 1.0 if fraud_class_index[0] == 1 else -1.0
+    coefficients = orientation * model.coef_[0]
+    contributions = coefficients * scaled_values
     ranking = pd.DataFrame(
         {
             "feature": feature_columns,
             "value": values,
             "scaled_value": scaled_values,
             "coefficient": coefficients,
-            "contribution_score": contributions,
+            "contribution": contributions,
+            "contribution_score": np.abs(contributions),
         }
     ).sort_values("contribution_score", ascending=False)
     return ranking.reset_index(drop=True)

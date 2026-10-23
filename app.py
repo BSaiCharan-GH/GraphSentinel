@@ -8,6 +8,14 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from sklearn.metrics import (
+    average_precision_score,
+    confusion_matrix,
+    precision_recall_curve,
+    precision_recall_fscore_support,
+    roc_auc_score,
+    roc_curve,
+)
 
 from src.graph.graph_builder import build_similarity_graph
 from src.models.fraud_model import (
@@ -69,6 +77,21 @@ def get_prediction_table() -> pd.DataFrame:
         return build_evaluation_frame()
     except (FileNotFoundError, ValueError):
         return pd.DataFrame()
+
+
+@st.cache_data(show_spinner=False)
+def get_similarity_graph(
+    predictions: pd.DataFrame,
+    feature_columns: tuple[str, ...],
+    k_neighbors: int,
+    max_nodes: int,
+) -> dict:
+    return build_similarity_graph(
+        predictions,
+        list(feature_columns),
+        k_neighbors=k_neighbors,
+        max_nodes=max_nodes,
+    )
 
 
 def render_kpi_card(label: str, value: str, accent: str = "#E2E8F0") -> None:
@@ -259,26 +282,39 @@ def render_overview() -> None:
 
 def render_feature_importance_chart(explanation: pd.DataFrame, top_n: int = 8) -> None:
     chart_df = explanation.head(top_n).copy()
-    chart_df = chart_df.sort_values("contribution_score", ascending=False)
-    chart_df["direction"] = np.where(chart_df["coefficient"] >= 0, "positive", "negative")
+    chart_df = chart_df.sort_values("contribution_score", ascending=True)
+    chart_df["evidence"] = np.select(
+        [chart_df["contribution"] > 0, chart_df["contribution"] < 0],
+        ["Supports fraud", "Opposes fraud"],
+        default="Neutral",
+    )
     fig = px.bar(
         chart_df,
-        x="contribution_score",
+        x="contribution",
         y="feature",
         orientation="h",
-        color="direction",
-        color_discrete_map={"positive": "#22D3EE", "negative": "#F59E0B"},
-        title="Top model-driven feature contributions",
-        text="contribution_score",
+        color="evidence",
+        color_discrete_map={
+            "Supports fraud": "#F87171",
+            "Opposes fraud": "#38BDF8",
+            "Neutral": "#94A3B8",
+        },
+        title="Signed contribution to fraud-class score",
+        text="contribution",
     )
     fig.update_layout(
         template="plotly_dark",
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         margin=dict(l=10, r=10, t=40, b=10),
-        showlegend=False,
+        legend_title_text="Evidence direction",
     )
-    fig.update_traces(texttemplate="%{text:.3f}", textposition="outside")
+    fig.add_vline(x=0, line_color="rgba(226,232,240,0.45)", line_width=1)
+    fig.update_traces(
+        texttemplate="%{text:+.3f}",
+        textposition="outside",
+        hovertemplate="%{y}<br>Signed logit contribution: %{x:+.4f}<extra></extra>",
+    )
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -324,6 +360,21 @@ def render_transaction_explorer() -> None:
         filtered = filtered.sort_values("Time", ascending=True)
 
     st.subheader("Filtered transactions")
+    page_size = st.selectbox("Rows per page", [25, 50, 100], index=0, key="transaction_page_size")
+    page_count = max(1, int(np.ceil(len(filtered) / page_size)))
+    if int(st.session_state.get("transaction_page_number", 1)) > page_count:
+        st.session_state["transaction_page_number"] = page_count
+    page_number = st.number_input(
+        "Page",
+        min_value=1,
+        max_value=page_count,
+        value=1,
+        step=1,
+        key="transaction_page_number",
+    )
+    page_start = (int(page_number) - 1) * page_size
+    visible_rows = filtered.iloc[page_start : page_start + page_size]
+    st.caption(f"Showing {len(visible_rows):,} of {len(filtered):,} matching transactions")
     display_columns = [
         "transaction_id",
         "split",
@@ -333,10 +384,10 @@ def render_transaction_explorer() -> None:
         "risk_category",
         "Class",
     ]
-    st.dataframe(filtered[display_columns], use_container_width=True, hide_index=True)
+    st.dataframe(visible_rows[display_columns], use_container_width=True, hide_index=True)
 
     st.subheader("Selected transaction")
-    transaction_options = ["Select a transaction"] + filtered["transaction_id"].tolist()
+    transaction_options = ["Select a transaction"] + visible_rows["transaction_id"].tolist()
     selected_id = st.selectbox("Choose a row", transaction_options)
     if selected_id == "Select a transaction":
         st.info("Choose a transaction to inspect its feature values and model interpretation.")
@@ -369,7 +420,7 @@ def render_transaction_explorer() -> None:
     st.subheader("Feature values and explanation")
     left_col, right_col = st.columns([1.2, 1])
     with left_col:
-        explanation_cols = ["feature", "value", "coefficient", "contribution_score"]
+        explanation_cols = ["feature", "value", "coefficient", "contribution", "contribution_score"]
         st.dataframe(explain.head(12)[explanation_cols], use_container_width=True, hide_index=True)
     with right_col:
         render_feature_importance_chart(explain, top_n=8)
@@ -394,7 +445,7 @@ def render_graph_intelligence() -> None:
         k_neighbors = st.slider("k-nearest neighbors", min_value=3, max_value=20, value=8)
         max_nodes = st.slider("Sample size", min_value=100, max_value=min(len(predictions), 1000), value=min(600, len(predictions)))
 
-    graph = build_similarity_graph(predictions, feature_columns, k_neighbors=k_neighbors, max_nodes=max_nodes)
+    graph = get_similarity_graph(predictions, tuple(feature_columns), k_neighbors, max_nodes)
     if not graph.get("nodes") or not graph.get("edges"):
         st.warning("The similarity graph is unavailable with the current sample configuration. Try a different neighborhood size or a larger sample.")
         return
@@ -441,9 +492,8 @@ def render_graph_intelligence() -> None:
         go.Scatter(
             x=node_x,
             y=node_y,
-            mode="markers+text",
+            mode="markers",
             text=node_text,
-            textposition="top center",
             marker=dict(
                 size=10,
                 color=node_risk,
@@ -467,6 +517,31 @@ def render_graph_intelligence() -> None:
         yaxis=dict(showgrid=False, zeroline=False, visible=False),
     )
     st.plotly_chart(fig, use_container_width=True)
+
+    selected_node_id = st.selectbox(
+        "Inspect sampled transaction",
+        options=list(node_lookup),
+        key="graph_selected_node",
+    )
+    selected_node = node_lookup[selected_node_id]
+    node_details = st.columns(3)
+    node_details[0].metric("Selected transaction", selected_node_id)
+    node_details[1].metric("Model score", f"{selected_node['risk_score']:.4f}")
+    node_details[2].metric("Split", selected_node["split"])
+    selected_edges = [
+        {
+            "neighbor_id": edge["target"] if edge["source"] == selected_node_id else edge["source"],
+            "similarity": edge["similarity"],
+            "distance": edge["distance"],
+        }
+        for edge in graph["edges"]
+        if edge["source"] == selected_node_id or edge["target"] == selected_node_id
+    ]
+    if selected_edges:
+        neighbors = pd.DataFrame(selected_edges).sort_values("similarity", ascending=False)
+        st.dataframe(neighbors, use_container_width=True, hide_index=True)
+    else:
+        st.info("No sampled similarity neighbors are available for this transaction.")
 
     st.subheader("Graph construction notes")
     st.markdown(
@@ -551,7 +626,11 @@ def render_fraud_investigation() -> None:
         feature_columns,
     )
     top_features = explanation.head(5).copy()
-    top_features["signal"] = np.where(top_features["coefficient"] >= 0, "Positive evidence", "Negative evidence")
+    top_features["signal"] = np.select(
+        [top_features["contribution"] > 0, top_features["contribution"] < 0],
+        ["Supports fraud", "Opposes fraud"],
+        default="Neutral",
+    )
     st.markdown(
         """
         <div style="padding: 14px 16px; border:1px solid rgba(148,163,184,0.2); border-radius: 12px; background: rgba(15,23,42,0.82); margin-bottom: 12px;">
@@ -565,11 +644,11 @@ def render_fraud_investigation() -> None:
     )
     left_col, right_col = st.columns([1.2, 1])
     with left_col:
-        st.dataframe(top_features[["feature", "value", "coefficient", "contribution_score", "signal"]], use_container_width=True, hide_index=True)
+        st.dataframe(top_features[["feature", "value", "coefficient", "contribution", "signal"]], use_container_width=True, hide_index=True)
     with right_col:
         render_feature_importance_chart(explanation, top_n=6)
 
-    graph = build_similarity_graph(predictions, feature_columns, k_neighbors=8, max_nodes=min(500, len(predictions)))
+    graph = get_similarity_graph(predictions, tuple(feature_columns), 8, min(500, len(predictions)))
     neighbor_ids = []
     if graph.get("edges"):
         for edge in graph["edges"]:
@@ -609,21 +688,295 @@ def render_fraud_investigation() -> None:
     )
 
 
+def render_model_lab() -> None:
+    st.markdown(
+        """
+        <div class="page-intro">
+            <div class="eyebrow">EVALUATION WORKSPACE</div>
+            <div class="intro-copy">Inspect held-out model performance and the validation-selected operating threshold without mixing their roles.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    try:
+        predictions = get_prediction_table()
+        model_artifact = load_trained_model()
+    except (FileNotFoundError, ValueError) as error:
+        st.warning("Model Lab needs trained model artifacts and processed train/validation/test splits.")
+        st.code("python src/data/validate_dataset.py\npython src/data/split_dataset.py\npython src/models/train_baseline.py")
+        st.caption(str(error))
+        return
+
+    if predictions.empty:
+        st.info("No evaluated predictions are available. Train the baseline model to create evaluation results.")
+        return
+
+    test = predictions.loc[predictions["split"] == "test"].copy()
+    validation = predictions.loc[predictions["split"] == "validation"].copy()
+    if test.empty or validation.empty:
+        st.warning("Both validation and held-out test predictions are required for Model Lab.")
+        return
+
+    threshold = float(model_artifact["selected_threshold"])
+    y_test = test["Class"].astype(int).to_numpy()
+    test_scores = test["model_probability"].to_numpy(dtype=float)
+    test_predictions = (test_scores >= threshold).astype(int)
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        y_test,
+        test_predictions,
+        average="binary",
+        zero_division=0,
+    )
+    roc_auc = roc_auc_score(y_test, test_scores)
+    pr_auc = average_precision_score(y_test, test_scores)
+
+    st.caption(
+        f"Final evaluation uses the held-out test split. The operating threshold "
+        f"({threshold:.6f}) was selected using validation data only."
+    )
+    metric_columns = st.columns(5)
+    metrics = [
+        ("Precision", precision),
+        ("Recall", recall),
+        ("F1-score", f1),
+        ("ROC-AUC", roc_auc),
+        ("PR-AUC", pr_auc),
+    ]
+    for column, (label, value) in zip(metric_columns, metrics):
+        with column:
+            render_kpi_card(label, f"{value:.3f}", "#67E8F9")
+
+    st.subheader("Held-out test evaluation")
+    cm = confusion_matrix(y_test, test_predictions, labels=[0, 1])
+    cm_figure = go.Figure(
+        data=go.Heatmap(
+            z=cm,
+            x=["Predicted legitimate", "Predicted fraud"],
+            y=["Actual legitimate", "Actual fraud"],
+            colorscale=[[0, "#0F172A"], [1, "#0891B2"]],
+            showscale=False,
+            text=cm,
+            texttemplate="%{text}",
+            textfont={"size": 18, "color": "#F8FAFC"},
+            hovertemplate="%{y}<br>%{x}<br>Count: %{z}<extra></extra>",
+        )
+    )
+    cm_figure.update_layout(
+        title="Confusion matrix at validation-selected threshold",
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=10, r=10, t=50, b=10),
+        xaxis_title="Prediction",
+        yaxis_title="Ground truth",
+    )
+
+    fpr, tpr, _ = roc_curve(y_test, test_scores)
+    roc_figure = go.Figure()
+    roc_figure.add_trace(go.Scatter(x=fpr, y=tpr, mode="lines", name=f"ROC-AUC {roc_auc:.3f}", line={"color": "#22D3EE", "width": 2}))
+    roc_figure.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode="lines", name="Chance", line={"color": "#64748B", "dash": "dash"}))
+    roc_figure.update_layout(
+        title="ROC curve · held-out test",
+        xaxis_title="False positive rate",
+        yaxis_title="True positive rate",
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=10, r=10, t=50, b=10),
+        legend=dict(orientation="h", y=-0.25),
+    )
+
+    precision_curve, recall_curve, _ = precision_recall_curve(y_test, test_scores)
+    pr_figure = go.Figure()
+    pr_figure.add_trace(
+        go.Scatter(
+            x=recall_curve,
+            y=precision_curve,
+            mode="lines",
+            name=f"PR-AUC {pr_auc:.3f}",
+            line={"color": "#F59E0B", "width": 2},
+        )
+    )
+    pr_figure.update_layout(
+        title="Precision-recall curve · held-out test",
+        xaxis_title="Recall",
+        yaxis_title="Precision",
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=10, r=10, t=50, b=10),
+        yaxis=dict(range=[0, 1.02]),
+    )
+
+    cm_col, roc_col = st.columns([1, 1.2])
+    with cm_col:
+        st.plotly_chart(cm_figure, use_container_width=True)
+    with roc_col:
+        st.plotly_chart(roc_figure, use_container_width=True)
+    st.plotly_chart(pr_figure, use_container_width=True)
+
+    st.subheader("Threshold trade-off · validation split")
+    val_labels = validation["Class"].astype(int).to_numpy()
+    val_scores = validation["model_probability"].to_numpy(dtype=float)
+    val_precision, val_recall, val_thresholds = precision_recall_curve(val_labels, val_scores)
+    if len(val_thresholds):
+        sample_indexes = np.unique(
+            np.linspace(0, len(val_thresholds) - 1, min(250, len(val_thresholds))).astype(int)
+        )
+        threshold_figure = go.Figure()
+        threshold_figure.add_trace(
+            go.Scatter(
+                x=val_thresholds[sample_indexes],
+                y=val_precision[:-1][sample_indexes],
+                mode="lines",
+                name="Precision",
+                line={"color": "#22D3EE", "width": 2},
+            )
+        )
+        threshold_figure.add_trace(
+            go.Scatter(
+                x=val_thresholds[sample_indexes],
+                y=val_recall[:-1][sample_indexes],
+                mode="lines",
+                name="Recall",
+                line={"color": "#F59E0B", "width": 2},
+            )
+        )
+        threshold_figure.add_vline(
+            x=threshold,
+            line_color="#F87171",
+            line_dash="dash",
+            annotation_text="Selected threshold",
+        )
+        threshold_figure.update_layout(
+            title="Validation precision and recall by decision threshold",
+            xaxis_title="Decision threshold",
+            yaxis_title="Metric",
+            template="plotly_dark",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=10, r=10, t=50, b=10),
+            yaxis=dict(range=[0, 1.02]),
+            legend=dict(orientation="h", y=-0.25),
+        )
+        st.plotly_chart(threshold_figure, use_container_width=True)
+    else:
+        st.info("Threshold curve is unavailable because the validation split has no score thresholds.")
+
+    st.caption(
+        "Threshold is selected by maximizing validation F1 (ties prefer the higher threshold). "
+        "Test curves and metrics are reported separately and are not used for threshold selection."
+    )
+
+
+def render_methodology_data() -> None:
+    st.markdown(
+        """
+        <div class="page-intro">
+            <div class="eyebrow">MODEL CARD · DATA LINEAGE</div>
+            <div class="intro-copy">A transparent account of what GraphSentinel currently does—and what the source data cannot tell us.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    left, right = st.columns(2)
+    with left:
+        st.subheader("Dataset and target")
+        st.markdown(
+            """
+            The project uses the public ULB / Worldline credit-card fraud dataset. Each row is a transaction record with `Time`, `Amount`, anonymized PCA components `V1`–`V28`, and binary target `Class` (`0` legitimate, `1` fraud).
+
+            The dataset contains no customer, card, merchant, or device identifiers. Its transaction IDs in the interface are generated from split and row position; they are not payment-provider IDs.
+            """
+        )
+        st.subheader("Validation and preprocessing")
+        st.markdown(
+            """
+            `src/data/validate_dataset.py` checks the expected columns, numeric/finite values, missing values, non-negative time and amount, and binary labels. `src/data/split_dataset.py` creates a reproducible, stratified 70% train / 15% validation / 15% test split using seed `42`.
+
+            The model pipeline fits `StandardScaler` on training features only, then applies that scaler to validation and test features. The binary target is excluded from model inputs.
+            """
+        )
+    with right:
+        st.subheader("Baseline and evaluation")
+        st.markdown(
+            """
+            The baseline is scikit-learn logistic regression with `class_weight=\"balanced\"`, `random_state=42`, and `max_iter=2000`. Precision, recall, F1, ROC-AUC, and average precision (PR-AUC) describe performance; confusion matrix and curves are calculated from actual split predictions.
+
+            The decision threshold is selected by maximizing F1 on validation predictions; ties prefer the higher threshold. The held-out test split is reserved for final reporting and does not select the threshold.
+            """
+        )
+        st.subheader("Signed feature contributions")
+        st.markdown(
+            """
+            For the binary linear model, each feature contribution is its standardized value multiplied by the coefficient oriented toward fraud class `1`. Positive values support the fraud-class logit; negative values oppose it. Features are ranked by absolute contribution magnitude while retaining the sign.
+
+            These are additive model signals in logit space—not causal explanations and not direct changes in probability.
+            """
+        )
+
+    st.subheader("Transaction-similarity graph")
+    st.markdown(
+        """
+        The graph standardizes the explicitly supplied model feature columns, samples a bounded number of transactions, and connects each transaction to its nearest neighbors using Euclidean distance. PCA projects the sample to two dimensions for visualization. `Class` and prediction metadata are excluded from distance calculations.
+
+        **Edges represent inferred similarity between transaction feature vectors only. They are not real customer, card, merchant, device, or payment-network relationships.**
+        """
+    )
+    st.subheader("Limitations")
+    st.markdown(
+        """
+        - PCA-transformed inputs limit domain-level interpretation of `V1`–`V28`.
+        - Fraud is highly imbalanced; metrics depend on the selected operating threshold and evaluation split.
+        - A stratified random split is a baseline protocol, not a substitute for time-based or production validation.
+        - Similarity edges are analytical neighbors, not evidence of collusion or shared ownership.
+        - This project is a local prototype and does not connect to Razorpay live infrastructure.
+        """
+    )
+
+
 def main() -> None:
     st.set_page_config(page_title="GraphSentinel | Fraud Intelligence", page_icon="🛡️", layout="wide")
     st.markdown(
         """
         <style>
-            .stApp { background: #020817; color: #E2E8F0; }
-            div[data-testid="stSidebar"] { background: rgba(15, 23, 42, 0.97); }
-            div[data-testid="stSidebarNav"] { background: rgba(15, 23, 42, 0.95); }
-            section[data-testid="stSidebarContent"] { padding: 1rem 0.8rem; }
-            .stTabs [data-baseweb="tab-list"] { gap: 12px; }
-            .stTabs [data-baseweb="tab"] { border-radius: 10px; color: #CBD5E1; }
-            .stTabs [data-baseweb="tab-selected"] { background: rgba(34, 211, 238, 0.12); border: 1px solid rgba(34, 211, 238, 0.4); color: #E2E8F0; }
-            .stDataFrame { background: rgba(15, 23, 42, 0.75); }
-            .css-1d391kg, .css-18e3th9 { background: rgba(15, 23, 42, 0.0); }
-            .stSelectbox > div > div, .stMultiSelect > div > div, .stTextInput > div > div, .stNumberInput > div > div { background: rgba(15,23,42,0.75); border: 1px solid rgba(148,163,184,0.2); }
+            :root { color-scheme: dark; }
+            .stApp { background: #070D18; color: #E6EDF7; }
+            [data-testid="stAppViewContainer"] { background: radial-gradient(ellipse at 18% 0%, rgba(19, 47, 78, 0.22), transparent 36%), #070D18; }
+            [data-testid="stHeader"] { background: rgba(7, 13, 24, 0.82); }
+            [data-testid="stMainBlockContainer"] { max-width: 1500px; padding: 2rem clamp(1rem, 3vw, 2.75rem) 3rem; }
+            div[data-testid="stSidebar"] { background: #0A1220; border-right: 1px solid rgba(148,163,184,0.13); }
+            section[data-testid="stSidebarContent"] { padding: 1.15rem 0.85rem; }
+            h1, h2, h3 { color: #F1F5FB !important; letter-spacing: -0.025em; }
+            h1 { font-size: clamp(1.75rem, 3vw, 2.4rem) !important; margin: 0.25rem 0 1.2rem !important; }
+            h2 { font-size: 1.25rem !important; margin-top: 1.7rem !important; }
+            h3 { font-size: 1rem !important; }
+            p, li, label, [data-testid="stCaptionContainer"] { color: #A8B5C8; }
+            .page-intro { border: 1px solid rgba(148,163,184,0.15); border-radius: 16px; background: linear-gradient(115deg, rgba(15,27,44,0.92), rgba(11,20,33,0.84)); padding: 1.15rem 1.35rem; margin: 0 0 1.25rem; }
+            .eyebrow { color: #67DDF2; font-size: 0.68rem; font-weight: 700; letter-spacing: .16em; margin-bottom: .45rem; }
+            .intro-copy { color: #CFD9E7; font-size: 1rem; line-height: 1.55; max-width: 72rem; }
+            div[data-testid="stMetric"] { border: 1px solid rgba(148,163,184,0.15); border-radius: 14px; background: #0D1726; padding: .85rem 1rem; }
+            div[data-testid="stMetricLabel"] { color: #98A8BC; }
+            div[data-testid="stMetricValue"] { color: #ECF6FF; font-weight: 650; }
+            div[data-testid="stDataFrame"], div[data-testid="stTable"] { border: 1px solid rgba(148,163,184,0.16); border-radius: 12px; overflow: hidden; }
+            div[data-testid="stPlotlyChart"] { border: 1px solid rgba(148,163,184,0.12); border-radius: 14px; background: rgba(13,23,38,0.48); padding: .35rem; }
+            [data-testid="stVerticalBlockBorderWrapper"] { border-color: rgba(148,163,184,0.15) !important; border-radius: 14px !important; }
+            .stButton > button, .stDownloadButton > button { border-radius: 10px; border: 1px solid rgba(56,189,248,0.35); background: #102238; color: #E6F8FF; transition: background .16s ease, border-color .16s ease, transform .16s ease; }
+            .stButton > button:hover, .stDownloadButton > button:hover { background: #16314D; border-color: #38BDF8; transform: translateY(-1px); }
+            .stButton > button:focus-visible, .stDownloadButton > button:focus-visible, input:focus-visible { outline: 2px solid #38BDF8 !important; outline-offset: 2px; }
+            [data-baseweb="select"] > div, [data-baseweb="input"] > div, [data-baseweb="textarea"] > div { background: #0C1726; border-color: rgba(148,163,184,0.22); border-radius: 10px; }
+            [data-baseweb="select"] > div:hover, [data-baseweb="input"] > div:hover, [data-baseweb="textarea"] > div:hover { border-color: rgba(56,189,248,0.58); }
+            div[role="radiogroup"] label { border: 1px solid transparent; border-radius: 10px; padding: .35rem .5rem; transition: background .15s ease, border-color .15s ease; }
+            div[role="radiogroup"] label:hover { background: rgba(56,189,248,0.08); border-color: rgba(56,189,248,0.2); }
+            .stTabs [data-baseweb="tab-list"] { gap: 8px; border-bottom-color: rgba(148,163,184,0.16); }
+            .stTabs [data-baseweb="tab"] { border-radius: 9px 9px 0 0; color: #A8B5C8; }
+            .stTabs [aria-selected="true"] { color: #E6F8FF !important; border-bottom-color: #38BDF8 !important; }
+            @media (max-width: 760px) {
+                [data-testid="stMainBlockContainer"] { padding: 1rem .85rem 2rem; }
+                .page-intro { padding: .9rem 1rem; }
+                div[data-testid="stMetric"] { padding: .7rem .75rem; }
+            }
         </style>
         """,
         unsafe_allow_html=True,
@@ -631,7 +984,7 @@ def main() -> None:
 
     st.sidebar.markdown(
         """
-        <div style="padding: 18px 16px; border: 1px solid rgba(148,163,184,0.25); border-radius: 16px; background: linear-gradient(135deg, rgba(15,23,42,0.96), rgba(34,211,238,0.08)); margin-bottom: 12px; box-shadow: 0 10px 30px rgba(15,23,42,0.25);">
+        <div style="padding: 18px 16px; border: 1px solid rgba(148,163,184,0.18); border-radius: 15px; background: #101D2E; margin-bottom: 12px;">
             <div style="font-size: 11px; letter-spacing: 0.18em; color: #67E8F9; text-transform: uppercase; margin-bottom: 10px;">Fraud intelligence</div>
             <div style="font-size: 2rem; font-weight: 700; color: #F8FAFC; line-height: 1.1;">GraphSentinel</div>
             <div style="font-size: 0.82rem; color: #94A3B8; margin-top: 8px;">Explainable payment-risk intelligence</div>
@@ -646,8 +999,16 @@ def main() -> None:
 
     nav = st.sidebar.radio(
         "Navigation",
-        ["Overview", "Transaction Explorer", "Graph Intelligence", "Fraud Investigation"],
+        [
+            "Overview",
+            "Transaction Explorer",
+            "Graph Intelligence",
+            "Fraud Investigation",
+            "Model Lab",
+            "Methodology & Data",
+        ],
         index=0,
+        key="main_navigation",
     )
 
     if nav == "Overview":
@@ -659,9 +1020,15 @@ def main() -> None:
     elif nav == "Graph Intelligence":
         st.title("Graph Intelligence")
         render_graph_intelligence()
-    else:
+    elif nav == "Fraud Investigation":
         st.title("Fraud Investigation")
         render_fraud_investigation()
+    elif nav == "Model Lab":
+        st.title("Model Lab")
+        render_model_lab()
+    else:
+        st.title("Methodology & Data")
+        render_methodology_data()
 
 
 if __name__ == "__main__":

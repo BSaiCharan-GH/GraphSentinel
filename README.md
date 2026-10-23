@@ -43,6 +43,8 @@ The dataset contains anonymized PCA-transformed features. It does not include re
 7. Launch the dashboard:
    streamlit run app.py
 
+For a clean checkout, use the commands in that order after placing `creditcard.csv` at `data/raw/creditcard.csv`. Tests that need processed splits or trained artifacts report a clear pytest skip when those prerequisites are absent; standalone signed-explanation, threshold-selection, and synthetic graph-leakage tests do not require the dataset or saved model.
+
 ## Expected runtime behavior
 
 - If data/raw/creditcard.csv is missing, the app shows a friendly setup message instead of crashing.
@@ -50,6 +52,8 @@ The dataset contains anonymized PCA-transformed features. It does not include re
 - Training and evaluation remain reproducible because the selected validation threshold and held-out test metrics are saved to data/processed/evaluation_summary.json.
 - The operating threshold is selected by maximizing validation-set F1; when multiple thresholds tie, the higher threshold is preferred. The held-out test set is used only for final metric reporting.
 - Opening the dashboard does not train a model implicitly. Missing model artifacts display setup guidance; run the documented training command to create them.
+- Model Lab reports confusion matrix, precision, recall, F1, ROC-AUC, PR-AUC, ROC/PR curves, and threshold trade-offs when required outputs are present. Threshold analysis uses validation predictions; final test metrics use the held-out test split.
+- The dashboard includes the Overview, Transaction Explorer, Graph Intelligence, Fraud Investigation, Model Lab, and Methodology & Data pages.
 
 ## Repository structure
 
