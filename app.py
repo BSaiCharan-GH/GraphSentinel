@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from streamlit.errors import StreamlitSecretNotFoundError
 from sklearn.metrics import (
     average_precision_score,
     confusion_matrix,
@@ -18,18 +18,12 @@ from sklearn.metrics import (
 )
 
 from src.graph.graph_builder import build_similarity_graph
+from src.data.artifact_store import ArtifactStoreError, configure_from_mapping
 from src.models.fraud_model import (
     build_evaluation_frame,
     get_feature_contributions,
-    load_split_data,
     load_trained_model,
 )
-
-ROOT = Path(__file__).resolve().parent
-DATA_ROOT = ROOT / "data"
-RAW_DATA_PATH = DATA_ROOT / "raw" / "creditcard.csv"
-PROCESSED_DIR = DATA_ROOT / "processed"
-
 
 def _risk_band(value: float) -> str:
     if value < 0.2:
@@ -65,18 +59,13 @@ def render_sidebar_signal(predictions: pd.DataFrame) -> None:
 
 
 @st.cache_data(show_spinner=False)
-def load_raw_dataset() -> pd.DataFrame:
-    if not RAW_DATA_PATH.exists():
-        raise FileNotFoundError(f"Dataset not found at {RAW_DATA_PATH}")
-    return pd.read_csv(RAW_DATA_PATH)
-
-
-@st.cache_data(show_spinner=False)
 def get_prediction_table() -> pd.DataFrame:
-    try:
-        return build_evaluation_frame()
-    except (FileNotFoundError, ValueError):
-        return pd.DataFrame()
+    return build_evaluation_frame()
+
+
+@st.cache_resource(show_spinner=False)
+def get_model_artifact() -> dict:
+    return load_trained_model(require_splits=True)
 
 
 @st.cache_data(show_spinner=False)
@@ -107,61 +96,40 @@ def render_kpi_card(label: str, value: str, accent: str = "#E2E8F0") -> None:
 
 
 def render_setup_status() -> None:
-    processed_dir = ROOT / "data" / "processed"
-    dataset_ready = RAW_DATA_PATH.exists()
-    model_ready = (processed_dir / "fraud_model.joblib").exists()
-    summary_ready = (processed_dir / "evaluation_summary.json").exists()
+    st.info(
+        "Transaction analysis needs the train.csv, validation.csv, test.csv, "
+        "fraud_model.joblib, and evaluation_summary.json files under a local "
+        "processed/ directory or the configured external artifact repository."
+    )
+    st.markdown(
+        "For Streamlit Community Cloud, configure the private artifact dataset "
+        "in **App settings → Secrets**. See the README deployment instructions."
+    )
 
-    if not dataset_ready or not model_ready:
-        with st.container():
-            st.warning("Repository setup required before review workflows can run.")
-            st.code("python src/data/validate_dataset.py\npython src/data/split_dataset.py\npython src/models/train_baseline.py")
-            st.markdown(
-                """
-                <div style="padding: 14px 16px; border:1px solid rgba(148,163,184,0.2); border-radius: 12px; background: rgba(15,23,42,0.82);">
-                    <div style="font-size: 11px; color: #94A3B8; letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 8px;">Setup checklist</div>
-                    <div style="color: #E2E8F0; line-height: 1.7;">
-                        • Dataset present: %s<br>
-                        • Model artifacts present: %s<br>
-                        • Held-out evaluation summary: %s
-                    </div>
-                </div>
-                """ % (
-                    "Yes" if dataset_ready else "No",
-                    "Yes" if model_ready else "No",
-                    "Yes" if summary_ready else "No",
-                ),
-                unsafe_allow_html=True,
-            )
+
+def show_artifact_error(error: Exception) -> None:
+    st.error(f"Transaction artifacts are unavailable: {error}")
+    render_setup_status()
 
 
 def render_overview() -> None:
     try:
-        raw_df = load_raw_dataset()
-    except FileNotFoundError:
-        render_setup_status()
-        st.warning("The raw dataset is not available yet. Place the credit-card CSV in data/raw/creditcard.csv and rerun the validation step.")
-        return
-
-    try:
         predictions = get_prediction_table()
-        model_artifact = load_trained_model()
-    except (FileNotFoundError, ValueError):
-        render_setup_status()
-        st.info("No trained model output is available yet. Run the baseline training step to populate evaluation metrics.")
+        model_artifact = get_model_artifact()
+    except (ArtifactStoreError, FileNotFoundError, ValueError) as error:
+        show_artifact_error(error)
         return
 
     summary = model_artifact.get("summary") or {}
     test_summary = summary.get("test", {})
 
-    total_transactions = int(len(raw_df))
-    fraud_cases = int(raw_df["Class"].sum())
+    total_transactions = int(len(predictions))
+    fraud_cases = int(predictions["Class"].sum())
     fraud_rate = (fraud_cases / total_transactions) if total_transactions else 0.0
-
     if predictions.empty:
-        render_setup_status()
-        st.info("No trained model output is available yet. Run the baseline training step to populate evaluation metrics.")
+        st.info("No transaction records are available in the configured artifacts.")
         return
+    render_sidebar_signal(predictions)
 
     flagged_transactions = int((predictions["model_prediction"] == 1).sum())
     high_risk_transactions = int((predictions["model_probability"] >= 0.8).sum())
@@ -321,9 +289,9 @@ def render_feature_importance_chart(explanation: pd.DataFrame, top_n: int = 8) -
 def render_transaction_explorer() -> None:
     try:
         predictions = get_prediction_table()
-        model_artifact = load_trained_model()
-    except (FileNotFoundError, ValueError):
-        st.info("Transaction data is not available yet. Train the baseline model first.")
+        model_artifact = get_model_artifact()
+    except (ArtifactStoreError, FileNotFoundError, ValueError) as error:
+        show_artifact_error(error)
         return
 
     if predictions.empty:
@@ -331,6 +299,7 @@ def render_transaction_explorer() -> None:
         return
 
     feature_columns = model_artifact["feature_columns"]
+    render_sidebar_signal(predictions)
 
     with st.sidebar:
         st.subheader("Transaction filters")
@@ -429,9 +398,9 @@ def render_transaction_explorer() -> None:
 def render_graph_intelligence() -> None:
     try:
         predictions = get_prediction_table()
-        model_artifact = load_trained_model()
-    except (FileNotFoundError, ValueError):
-        st.info("Graph construction depends on the evaluated transaction frame. Train the baseline model first.")
+        model_artifact = get_model_artifact()
+    except (ArtifactStoreError, FileNotFoundError, ValueError) as error:
+        show_artifact_error(error)
         return
 
     if predictions.empty:
@@ -439,6 +408,7 @@ def render_graph_intelligence() -> None:
         return
 
     feature_columns = model_artifact["feature_columns"]
+    render_sidebar_signal(predictions)
 
     with st.sidebar:
         st.subheader("Graph settings")
@@ -583,9 +553,9 @@ def build_risk_review_payload(
 def render_fraud_investigation() -> None:
     try:
         predictions = get_prediction_table()
-        model_artifact = load_trained_model()
-    except (FileNotFoundError, ValueError):
-        st.info("Fraud investigation requires evaluated predictions. Train the baseline model first.")
+        model_artifact = get_model_artifact()
+    except (ArtifactStoreError, FileNotFoundError, ValueError) as error:
+        show_artifact_error(error)
         return
 
     if predictions.empty:
@@ -593,6 +563,7 @@ def render_fraud_investigation() -> None:
         return
 
     feature_columns = model_artifact["feature_columns"]
+    render_sidebar_signal(predictions)
     flagged = predictions.loc[predictions["model_prediction"] == 1].sort_values("model_probability", ascending=False)
 
     if flagged.empty:
@@ -700,11 +671,9 @@ def render_model_lab() -> None:
     )
     try:
         predictions = get_prediction_table()
-        model_artifact = load_trained_model()
-    except (FileNotFoundError, ValueError) as error:
-        st.warning("Model Lab needs trained model artifacts and processed train/validation/test splits.")
-        st.code("python src/data/validate_dataset.py\npython src/data/split_dataset.py\npython src/models/train_baseline.py")
-        st.caption(str(error))
+        model_artifact = get_model_artifact()
+    except (ArtifactStoreError, FileNotFoundError, ValueError) as error:
+        show_artifact_error(error)
         return
 
     if predictions.empty:
@@ -718,6 +687,7 @@ def render_model_lab() -> None:
         return
 
     threshold = float(model_artifact["selected_threshold"])
+    render_sidebar_signal(predictions)
     y_test = test["Class"].astype(int).to_numpy()
     test_scores = test["model_probability"].to_numpy(dtype=float)
     test_predictions = (test_scores >= threshold).astype(int)
@@ -938,6 +908,12 @@ def render_methodology_data() -> None:
 
 def main() -> None:
     st.set_page_config(page_title="GraphSentinel | Fraud Intelligence", page_icon="🛡️", layout="wide")
+    try:
+        configure_from_mapping(st.secrets)
+    except StreamlitSecretNotFoundError:
+        configure_from_mapping({})
+    except ValueError as error:
+        st.error(f"Invalid artifact storage configuration: {error}")
     st.markdown(
         """
         <style>
@@ -993,9 +969,6 @@ def main() -> None:
         unsafe_allow_html=True,
     )
     st.sidebar.caption("Portfolio-ready transaction risk workspace")
-
-    predictions = get_prediction_table()
-    render_sidebar_signal(predictions)
 
     nav = st.sidebar.radio(
         "Navigation",

@@ -3,6 +3,8 @@ from pathlib import Path
 
 import pytest
 
+from src.data.artifact_store import LOCAL_PROCESSED_DIR
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -11,11 +13,15 @@ if str(ROOT) not in sys.path:
 @pytest.fixture
 def processed_splits() -> None:
     required = [
-        ROOT / "data" / "processed" / "train.csv",
-        ROOT / "data" / "processed" / "validation.csv",
-        ROOT / "data" / "processed" / "test.csv",
+        LOCAL_PROCESSED_DIR / "train.csv",
+        LOCAL_PROCESSED_DIR / "validation.csv",
+        LOCAL_PROCESSED_DIR / "test.csv",
     ]
-    missing = [str(path.relative_to(ROOT)) for path in required if not path.is_file()]
+    missing = [
+        str(path.relative_to(ROOT)) if path.is_relative_to(ROOT) else str(path)
+        for path in required
+        if not path.is_file()
+    ]
     if missing:
         pytest.skip(
             "Integration test requires processed split files: "
@@ -28,10 +34,14 @@ def processed_splits() -> None:
 @pytest.fixture
 def trained_artifacts(processed_splits: None) -> None:
     required = [
-        ROOT / "data" / "processed" / "fraud_model.joblib",
-        ROOT / "data" / "processed" / "evaluation_summary.json",
+        LOCAL_PROCESSED_DIR / "fraud_model.joblib",
+        LOCAL_PROCESSED_DIR / "evaluation_summary.json",
     ]
-    missing = [str(path.relative_to(ROOT)) for path in required if not path.is_file()]
+    missing = [
+        str(path.relative_to(ROOT)) if path.is_relative_to(ROOT) else str(path)
+        for path in required
+        if not path.is_file()
+    ]
     if missing:
         pytest.skip(
             "Integration test requires trained model artifacts: "

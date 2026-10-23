@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import shutil
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
 from sklearn.linear_model import LogisticRegression
 
+from src.data import artifact_store
 from src.graph.graph_builder import build_similarity_graph
 from src.models import fraud_model
 from src.models.fraud_model import (
@@ -22,12 +26,24 @@ def test_loaded_model_artifact_has_expected_keys(trained_artifacts: None) -> Non
     assert "feature_columns" in artifact
 
 
-def test_prediction_frame_contains_expected_columns(trained_artifacts: None) -> None:
+def test_prediction_frame_contains_expected_columns(
+    trained_artifacts: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolved_requirements: list[tuple[str, ...]] = []
+    resolve_processed_dir = fraud_model.resolve_processed_dir
+
+    def record_runtime_bundle(required: tuple[str, ...]) -> Path:
+        resolved_requirements.append(tuple(required))
+        return resolve_processed_dir(required)
+
+    monkeypatch.setattr(fraud_model, "resolve_processed_dir", record_runtime_bundle)
     frame = build_evaluation_frame()
     expected = {"transaction_id", "model_probability", "model_prediction", "risk_category", "Class", "split"}
     assert expected.issubset(set(frame.columns))
     assert len(frame) > 0
     assert set(frame["Class"].dropna().unique()).issubset({0, 1})
+    assert resolved_requirements == [fraud_model.RUNTIME_REQUIRED_FILENAMES]
 
 
 def test_validation_split_is_class_balanced_enough(processed_splits: None) -> None:
@@ -93,10 +109,79 @@ def test_threshold_selection_chooses_maximum_validation_f1() -> None:
 
 
 def test_missing_model_artifacts_do_not_trigger_implicit_training(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(fraud_model, "MODEL_PATH", tmp_path / "missing-model.joblib")
-    monkeypatch.setattr(fraud_model, "SUMMARY_PATH", tmp_path / "missing-summary.json")
-    with pytest.raises(FileNotFoundError, match="train_baseline.py"):
+    monkeypatch.setenv("GRAPHSENTINEL_PROCESSED_DIR", str(tmp_path / "processed"))
+    monkeypatch.delenv("GRAPHSENTINEL_ARTIFACT_REPO", raising=False)
+    monkeypatch.delenv("GRAPHSENTINEL_HF_TOKEN", raising=False)
+    with pytest.raises(FileNotFoundError, match="GRAPHSENTINEL_PROCESSED_DIR"):
         fraud_model.load_trained_model()
+
+
+def test_configured_external_artifact_directory_is_used(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    remote_processed = tmp_path / "remote" / "processed"
+    remote_processed.mkdir(parents=True)
+    (remote_processed / "train.csv").write_text("Class\n0\n1\n", encoding="utf-8")
+    monkeypatch.setattr(artifact_store, "_artifact_repo_id", None)
+    monkeypatch.setattr(artifact_store, "_artifact_token", None)
+    monkeypatch.setattr(artifact_store, "_artifact_revision", None)
+    monkeypatch.setenv("GRAPHSENTINEL_PROCESSED_DIR", str(tmp_path / "local"))
+    artifact_store.configure_from_mapping(
+        {"artifacts": {"repo_id": "example/private-dataset", "token": "not-a-real-token"}}
+    )
+    monkeypatch.setattr(
+        artifact_store,
+        "_download_snapshot",
+        lambda repo_id, revision, token, required: remote_processed,
+    )
+
+    resolved = artifact_store.resolve_processed_dir(["train.csv"])
+    assert resolved == remote_processed
+
+
+def test_evaluation_summary_matches_current_test_split(trained_artifacts: None) -> None:
+    model_artifact = load_trained_model()
+    test_frame = build_evaluation_frame().query("split == 'test'")
+    actual = fraud_model._summarize_metrics(
+        test_frame["Class"].astype(int).to_numpy(),
+        test_frame["model_probability"].to_numpy(dtype=float),
+        model_artifact["selected_threshold"],
+    )
+    recorded = model_artifact["summary"]["test"]
+    for metric in ("precision", "recall", "f1", "roc_auc", "pr_auc"):
+        assert recorded[metric] == pytest.approx(actual[metric])
+
+
+def test_small_model_artifact_loads_without_transaction_splits(
+    trained_artifacts: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_split_load() -> None:
+        raise AssertionError("Model artifact loading should not require transaction splits.")
+
+    monkeypatch.setattr(fraud_model, "ensure_data_available", unexpected_split_load)
+    artifact = load_trained_model()
+    assert len(artifact["feature_columns"]) == artifact["model"].n_features_in_
+    assert artifact["model"].classes_.tolist() == [0, 1]
+
+
+def test_corrupted_model_artifact_has_actionable_error(
+    trained_artifacts: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    artifact_dir = tmp_path / "processed"
+    artifact_dir.mkdir()
+    shutil.copy(
+        fraud_model.PROCESSED_DIR / fraud_model.SUMMARY_FILENAME,
+        artifact_dir / fraud_model.SUMMARY_FILENAME,
+    )
+    (artifact_dir / fraud_model.MODEL_FILENAME).write_bytes(b"not a joblib artifact")
+    monkeypatch.setattr(fraud_model, "resolve_processed_dir", lambda required: artifact_dir)
+
+    with pytest.raises(ValueError, match="Could not deserialize model artifact"):
+        load_trained_model()
 
 
 @pytest.mark.parametrize(
@@ -131,7 +216,6 @@ def test_signed_feature_contributions_preserve_direction_and_rank(
         row,
         ["first", "second", "third"],
     )
-    by_feature = contributions.set_index("feature")
     by_feature = contributions.set_index("feature")
     assert by_feature.loc[feature, "contribution"] == pytest.approx(expected)
     assert contributions["contribution_score"].is_monotonic_decreasing

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import pickle
 from pathlib import Path
 from typing import Any
 
@@ -16,10 +18,23 @@ from sklearn.metrics import (
 )
 from sklearn.preprocessing import StandardScaler
 
+from src.data.artifact_store import resolve_processed_dir
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
-MODEL_PATH = PROCESSED_DIR / "fraud_model.joblib"
-SUMMARY_PATH = PROCESSED_DIR / "evaluation_summary.json"
+LOCAL_PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
+PROCESSED_DIR = LOCAL_PROCESSED_DIR
+MODEL_FILENAME = "fraud_model.joblib"
+SUMMARY_FILENAME = "evaluation_summary.json"
+SPLIT_FILENAMES = {
+    "train": "train.csv",
+    "validation": "validation.csv",
+    "test": "test.csv",
+}
+RUNTIME_REQUIRED_FILENAMES = (
+    *SPLIT_FILENAMES.values(),
+    MODEL_FILENAME,
+    SUMMARY_FILENAME,
+)
 
 
 def _load_csv(path: Path) -> pd.DataFrame:
@@ -87,16 +102,16 @@ def _summarize_metrics(y_true: np.ndarray, probabilities: np.ndarray, threshold:
     }
 
 
-def load_split_data() -> dict[str, pd.DataFrame]:
+def load_split_data(processed_dir: Path | None = None) -> dict[str, pd.DataFrame]:
+    processed_dir = processed_dir or resolve_processed_dir(SPLIT_FILENAMES.values())
     return {
-        "train": _load_csv(PROCESSED_DIR / "train.csv"),
-        "validation": _load_csv(PROCESSED_DIR / "validation.csv"),
-        "test": _load_csv(PROCESSED_DIR / "test.csv"),
+        name: _load_csv(processed_dir / filename)
+        for name, filename in SPLIT_FILENAMES.items()
     }
 
 
-def ensure_data_available() -> dict[str, pd.DataFrame]:
-    split_data = load_split_data()
+def ensure_data_available(processed_dir: Path | None = None) -> dict[str, pd.DataFrame]:
+    split_data = load_split_data(processed_dir)
     expected_columns = list(split_data["train"].columns)
     for name, frame in split_data.items():
         if "Class" not in frame.columns:
@@ -174,42 +189,98 @@ def train_baseline_model(save_artifacts: bool = True) -> dict[str, Any]:
     }
 
     if save_artifacts:
-        PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-        joblib.dump({"model": model, "scaler": scaler, "threshold": val_threshold}, MODEL_PATH)
+        processed_dir = LOCAL_PROCESSED_DIR
+        processed_dir.mkdir(parents=True, exist_ok=True)
+        model_path = processed_dir / MODEL_FILENAME
+        joblib.dump({"model": model, "scaler": scaler, "threshold": val_threshold}, model_path)
+        model_sha256 = hashlib.sha256(model_path.read_bytes()).hexdigest()
         summary_payload = {
             "model_name": artifact["model_name"],
             "selected_threshold": val_threshold,
             "training_rows": int(len(train_df)),
             "feature_columns": feature_columns,
+            "model_sha256": model_sha256,
             "validation": validation_summary,
             "test": test_summary,
         }
-        SUMMARY_PATH.write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
+        (processed_dir / SUMMARY_FILENAME).write_text(
+            json.dumps(summary_payload, indent=2),
+            encoding="utf-8",
+        )
 
     return artifact
 
 
-def load_trained_model() -> dict[str, Any]:
-    if not MODEL_PATH.exists() or not SUMMARY_PATH.exists():
-        missing = [str(path) for path in (MODEL_PATH, SUMMARY_PATH) if not path.exists()]
-        raise FileNotFoundError(
-            "Trained model artifacts are missing: "
-            + ", ".join(missing)
-            + ". Run `python src/models/train_baseline.py` to create them."
-        )
-
-    loaded = joblib.load(MODEL_PATH)
-    summary = json.loads(SUMMARY_PATH.read_text(encoding="utf-8"))
-    split_data = ensure_data_available()
-    feature_columns = summary.get("feature_columns", [col for col in split_data["train"].columns if col != "Class"])
-    if not feature_columns or any(column not in split_data["train"].columns for column in feature_columns):
-        raise ValueError("Model feature columns do not match the available training split.")
+def load_trained_model(
+    processed_dir: Path | None = None,
+    require_splits: bool = False,
+) -> dict[str, Any]:
+    required_files = (
+        RUNTIME_REQUIRED_FILENAMES
+        if require_splits
+        else (MODEL_FILENAME, SUMMARY_FILENAME)
+    )
+    processed_dir = processed_dir or resolve_processed_dir(required_files)
+    model_path = processed_dir / MODEL_FILENAME
+    summary_path = processed_dir / SUMMARY_FILENAME
+    try:
+        loaded = joblib.load(model_path)
+    except (
+        EOFError,
+        OSError,
+        pickle.UnpicklingError,
+        ValueError,
+        KeyError,
+        AttributeError,
+        ImportError,
+        TypeError,
+        IndexError,
+    ) as exc:
+        raise ValueError(
+            f"Could not deserialize model artifact at {model_path}. "
+            "Verify it is the matching fraud_model.joblib and upload it again if corrupted."
+        ) from exc
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"Could not read evaluation summary at {summary_path}. "
+            "Verify evaluation_summary.json and retrain the baseline if it is corrupted."
+        ) from exc
     if "model" not in loaded or "scaler" not in loaded or "threshold" not in loaded:
-        raise ValueError(f"Model artifact at {MODEL_PATH} is incomplete. Retrain the baseline model.")
+        raise ValueError(f"Model artifact at {model_path} is incomplete. Retrain the baseline model.")
+    model = loaded["model"]
+    scaler = loaded["scaler"]
+    feature_columns = summary.get("feature_columns", [])
+    if not feature_columns:
+        raise ValueError("Evaluation summary has no feature schema. Retrain the baseline model.")
+    expected_count = len(feature_columns)
+    if (
+        getattr(model, "n_features_in_", None) != expected_count
+        or getattr(scaler, "n_features_in_", None) != expected_count
+        or list(getattr(model, "classes_", [])) != [0, 1]
+    ):
+        raise ValueError("Model artifact feature schema or fraud class does not match its evaluation summary.")
+    for fitted_names in (
+        getattr(model, "feature_names_in_", None),
+        getattr(scaler, "feature_names_in_", None),
+    ):
+        if fitted_names is not None and list(fitted_names) != feature_columns:
+            raise ValueError("Model feature ordering does not match its evaluation summary.")
+    artifact_threshold = float(loaded["threshold"])
+    summary_threshold = float(summary.get("selected_threshold", float("nan")))
+    if not np.isfinite(artifact_threshold) or artifact_threshold != summary_threshold:
+        raise ValueError("Model threshold does not match its evaluation summary. Retrain the baseline model.")
+    expected_hash = summary.get("model_sha256")
+    if not expected_hash:
+        raise ValueError("Evaluation summary has no model checksum. Retrain and publish matching artifacts.")
+    actual_hash = hashlib.sha256(model_path.read_bytes()).hexdigest()
+    if actual_hash != expected_hash:
+        raise ValueError("Model artifact checksum does not match the evaluation summary.")
     output = {
-        "model": loaded["model"],
-        "scaler": loaded["scaler"],
-        "selected_threshold": float(loaded.get("threshold", summary.get("selected_threshold", 0.5))),
+        "model": model,
+        "scaler": scaler,
+        "selected_threshold": artifact_threshold,
         "feature_columns": feature_columns,
         "summary": summary,
     }
@@ -217,12 +288,15 @@ def load_trained_model() -> dict[str, Any]:
 
 
 def build_evaluation_frame() -> pd.DataFrame:
-    split_data = ensure_data_available()
-    model_artifact = load_trained_model()
+    processed_dir = resolve_processed_dir(RUNTIME_REQUIRED_FILENAMES)
+    split_data = ensure_data_available(processed_dir)
+    model_artifact = load_trained_model(processed_dir=processed_dir)
     model = model_artifact["model"]
     scaler = model_artifact["scaler"]
     threshold = model_artifact["selected_threshold"]
     feature_columns = model_artifact["feature_columns"]
+    if any(column not in split_data["train"].columns for column in feature_columns):
+        raise ValueError("Trained model feature schema does not match the downloaded transaction splits.")
 
     frames = []
     for split_name, frame in split_data.items():

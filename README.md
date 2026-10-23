@@ -55,6 +55,37 @@ For a clean checkout, use the commands in that order after placing `creditcard.c
 - Model Lab reports confusion matrix, precision, recall, F1, ROC-AUC, PR-AUC, ROC/PR curves, and threshold trade-offs when required outputs are present. Threshold analysis uses validation predictions; final test metrics use the held-out test split.
 - The dashboard includes the Overview, Transaction Explorer, Graph Intelligence, Fraud Investigation, Model Lab, and Methodology & Data pages.
 
+## Streamlit Community Cloud deployment
+
+The raw dataset and generated split CSVs are intentionally excluded from Git. The data-facing pages need `train.csv`, `validation.csv`, and `test.csv` at runtime; inference and evaluation also require a matching `fraud_model.joblib` and `evaluation_summary.json`. The Methodology & Data page is available without these artifacts.
+
+This app uses a private Hugging Face Hub **dataset repository** as external artifact storage. Upload only these files from `data/processed/`, preserving the `processed/` folder:
+
+```text
+processed/train.csv
+processed/validation.csv
+processed/test.csv
+processed/fraud_model.joblib
+processed/evaluation_summary.json
+```
+
+Do not upload `data/raw/creditcard.csv`. After artifact updates, run `python src/models/train_baseline.py` locally so the summary contains the SHA-256 checksum of its matching model file, then upload the model and summary together. Never edit the checksum by hand.
+
+Configure the deployed Streamlit app under **App settings → Secrets**:
+
+```toml
+[artifacts]
+repo_id = "YOUR_HUGGING_FACE_ACCOUNT/graphsentinel-artifacts"
+token = "YOUR_READ_ONLY_HUGGING_FACE_TOKEN"
+revision = "main"
+```
+
+Create a private dataset repository in your Hugging Face account and create a read-only token with access to it. Replace the example values yourself; no repository, URL, or token is embedded in this project. Keep the token only in Streamlit Secrets. The app fetches requested artifacts into the Hugging Face cache once per process; it does not download the raw dataset or retrain on Streamlit reruns. The three split CSVs total roughly 155 MB, so first use requires network transfer and sufficient app memory to load and score the splits.
+
+For local use, local `data/processed/` files are preferred. Alternatively set `GRAPHSENTINEL_PROCESSED_DIR` to a directory containing the five files above. `GRAPHSENTINEL_ARTIFACT_REPO`, `GRAPHSENTINEL_HF_TOKEN`, and `GRAPHSENTINEL_ARTIFACT_REVISION` may be used instead of Streamlit Secrets for non-Cloud environments.
+
+After pushing the application changes, use **Manage app → Reboot** (or wait for the repository sync/redeploy) in Streamlit Community Cloud. Verify that Overview loads transaction statistics, Model Lab displays split-based metrics, and Transaction Explorer displays rows. If artifact loading fails, inspect the app logs and verify the repo ID, read permission, revision, file paths, model checksum, and available memory. A successful local test does not itself verify a hosted deployment.
+
 ## Repository structure
 
 - app.py — Streamlit dashboard entry point
