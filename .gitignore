@@ -12,7 +12,7 @@ data/processed/*
 !data/processed/.gitkeep
 
 # Generated model artifacts and reports
-models/
+/models/
 reports/generated/
 *.joblib
 *.pkl

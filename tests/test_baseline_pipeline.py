@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
+import pytest
 
 from src.graph.graph_builder import build_similarity_graph
+from src.models import fraud_model
 from src.models.fraud_model import build_evaluation_frame, load_trained_model
 
 
@@ -39,3 +42,22 @@ def test_similarity_graph_uses_feature_space_only() -> None:
     assert all(edge["source"] != edge["target"] for edge in graph["edges"])
     assert all(edge["source"] in {node["id"] for node in graph["nodes"]} for edge in graph["edges"])
     assert all(edge["target"] in {node["id"] for node in graph["nodes"]} for edge in graph["edges"])
+
+
+def test_threshold_selection_chooses_maximum_validation_f1() -> None:
+    labels = np.array([0, 0, 1, 1])
+    probabilities = np.array([0.1, 0.4, 0.35, 0.8])
+    threshold = fraud_model._compute_threshold(labels, probabilities)
+    predicted = probabilities >= threshold
+    true_positive = int(((predicted == 1) & (labels == 1)).sum())
+    precision = true_positive / int(predicted.sum())
+    recall = true_positive / int(labels.sum())
+    selected_f1 = 2 * precision * recall / (precision + recall)
+    assert selected_f1 == pytest.approx(0.8)
+
+
+def test_missing_model_artifacts_do_not_trigger_implicit_training(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(fraud_model, "MODEL_PATH", tmp_path / "missing-model.joblib")
+    monkeypatch.setattr(fraud_model, "SUMMARY_PATH", tmp_path / "missing-summary.json")
+    with pytest.raises(FileNotFoundError, match="train_baseline.py"):
+        fraud_model.load_trained_model()

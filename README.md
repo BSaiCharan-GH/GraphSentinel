@@ -48,6 +48,8 @@ The dataset contains anonymized PCA-transformed features. It does not include re
 - If data/raw/creditcard.csv is missing, the app shows a friendly setup message instead of crashing.
 - If the processed model artifacts are absent, the app prompts the user to train the baseline before exploring predictions.
 - Training and evaluation remain reproducible because the selected validation threshold and held-out test metrics are saved to data/processed/evaluation_summary.json.
+- The operating threshold is selected by maximizing validation-set F1; when multiple thresholds tie, the higher threshold is preferred. The held-out test set is used only for final metric reporting.
+- Opening the dashboard does not train a model implicitly. Missing model artifacts display setup guidance; run the documented training command to create them.
 
 ## Repository structure
 
