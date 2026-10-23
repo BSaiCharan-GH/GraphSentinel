@@ -117,7 +117,7 @@ def test_missing_model_artifacts_do_not_trigger_implicit_training(monkeypatch, t
         "_download_snapshot",
         lambda *args: tmp_path / "remote" / "processed",
     )
-    with pytest.raises(artifact_store.ArtifactStoreError, match="processed/evaluation_summary.json"):
+    with pytest.raises(artifact_store.ArtifactStoreError, match="evaluation_summary.json"):
         fraud_model.load_trained_model()
 
 
@@ -151,9 +151,9 @@ def test_external_artifact_download_is_cached(
 
     def fake_snapshot_download(**kwargs: object) -> str:
         calls.append(kwargs)
-        processed = tmp_path / "snapshot" / "processed"
-        processed.mkdir(parents=True, exist_ok=True)
-        (processed / "train.csv").write_text("Class\n0\n1\n", encoding="utf-8")
+        snapshot = tmp_path / "snapshot"
+        snapshot.mkdir(parents=True, exist_ok=True)
+        (snapshot / "train.csv").write_text("Class\n0\n1\n", encoding="utf-8")
         return str(tmp_path / "snapshot")
 
     monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_snapshot_download)
@@ -172,10 +172,10 @@ def test_external_artifact_download_is_cached(
     finally:
         artifact_store._download_snapshot_cached.cache_clear()
 
-    assert first == second == tmp_path / "snapshot" / "processed"
+    assert first == second == tmp_path / "snapshot"
     assert len(calls) == 1
     assert calls[0]["repo_type"] == "dataset"
-    assert calls[0]["allow_patterns"] == ["processed/train.csv"]
+    assert calls[0]["allow_patterns"] == ["train.csv"]
     assert calls[0]["token"] is False
     assert calls[0]["repo_id"] == artifact_store.PUBLIC_DATASET_REPO_ID
 
@@ -187,7 +187,7 @@ def test_runtime_artifact_bundle_uses_exact_public_dataset_paths(
     import huggingface_hub
 
     request: dict[str, object] = {}
-    remote_processed = tmp_path / "snapshot" / "processed"
+    remote_processed = tmp_path / "snapshot"
     remote_processed.mkdir(parents=True)
     for filename in fraud_model.RUNTIME_REQUIRED_FILENAMES:
         (remote_processed / filename).write_bytes(b"artifact")
@@ -210,7 +210,7 @@ def test_runtime_artifact_bundle_uses_exact_public_dataset_paths(
     assert request["revision"] == "main"
     assert request["token"] is False
     assert set(request["allow_patterns"]) == {
-        f"processed/{filename}"
+        filename
         for filename in fraud_model.RUNTIME_REQUIRED_FILENAMES
     }
     artifact_store._download_snapshot_cached.cache_clear()
@@ -243,7 +243,7 @@ def test_private_or_unavailable_public_repo_has_safe_diagnostic(
 
     message = str(error.value)
     assert "denied anonymous access" in message
-    assert "processed/train.csv" in message
+    assert "train.csv" in message
     assert error.value.__cause__ is None
     artifact_store._download_snapshot_cached.cache_clear()
 
@@ -256,10 +256,10 @@ def test_missing_remote_files_report_expected_paths(
     monkeypatch.setattr(
         artifact_store,
         "_download_snapshot",
-        lambda *args: tmp_path / "snapshot" / "processed",
+        lambda *args: tmp_path / "snapshot",
     )
 
-    with pytest.raises(artifact_store.ArtifactStoreError, match="processed/train.csv"):
+    with pytest.raises(artifact_store.ArtifactStoreError, match="train.csv"):
         artifact_store.resolve_processed_dir(["train.csv"])
 
 

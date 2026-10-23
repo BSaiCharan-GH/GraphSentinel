@@ -114,7 +114,7 @@ def _download_snapshot_cached(
             repo_type="dataset",
             revision=revision,
             token=False,
-            allow_patterns=[f"processed/{name}" for name in required_files],
+            allow_patterns=list(required_files),
         )
     except handled_error_types as exc:
         status_code = getattr(getattr(exc, "response", None), "status_code", None)
@@ -126,7 +126,7 @@ def _download_snapshot_cached(
         elif isinstance(exc, entry_not_found):
             reason = (
                 "The requested files or revision were not found. Verify that every file "
-                "exists under the exact processed/ paths listed below."
+                "exists at the repository root at the exact paths listed below."
             )
         elif isinstance(exc, repository_not_found):
             reason = (
@@ -138,13 +138,13 @@ def _download_snapshot_cached(
                 "The anonymous Hub download failed. Check that the repository is public, "
                 "the revision and remote paths are correct, and disk/network access is available."
             )
-        expected_paths = ", ".join(f"processed/{name}" for name in required_files)
+        expected_paths = ", ".join(required_files)
         raise ArtifactStoreError(
             f"Could not download GraphSentinel artifacts from dataset '{repo_id}' "
             f"(revision '{revision or 'default'}'). {reason} Expected remote paths: "
             f"{expected_paths}. Failure type: {type(exc).__name__}."
         ) from None
-    return Path(snapshot).resolve() / "processed"
+    return Path(snapshot).resolve()
 
 
 def _download_snapshot(
@@ -170,7 +170,7 @@ def resolve_processed_dir(required_files: Iterable[str] = ()) -> Path:
             required,
         )
         missing = [
-            f"processed/{name}"
+            name
             for name in required
             if not (snapshot_dir / name).is_file()
         ]
@@ -183,15 +183,14 @@ def resolve_processed_dir(required_files: Iterable[str] = ()) -> Path:
             if empty:
                 raise ArtifactStoreError(
                     "Downloaded artifacts are empty at: "
-                    + ", ".join(f"processed/{name}" for name in empty)
+                    + ", ".join(empty)
                     + f" in public dataset '{PUBLIC_DATASET_REPO_ID}'."
                 )
             return snapshot_dir
         raise ArtifactStoreError(
             f"Public dataset '{PUBLIC_DATASET_REPO_ID}' is missing required remote paths: "
             + ", ".join(missing)
-            + ". Upload each file at exactly the listed path (do not nest another "
-            "processed/ directory)."
+            + ". Upload each file at exactly the listed path in the repository root."
         )
 
     missing = [name for name in required if not (local_dir / name).is_file()]
@@ -201,7 +200,7 @@ def resolve_processed_dir(required_files: Iterable[str] = ()) -> Path:
             + ", ".join(missing)
             + f". The app downloads missing files anonymously from public dataset "
             f"'{PUBLIC_DATASET_REPO_ID}'. Expected remote paths: "
-            + ", ".join(f"processed/{name}" for name in missing)
+            + ", ".join(missing)
             + "."
         )
     empty = [name for name in required if (local_dir / name).stat().st_size == 0]

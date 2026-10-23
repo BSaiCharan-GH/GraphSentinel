@@ -62,21 +62,21 @@ For a clean checkout, use the commands in that order after placing `creditcard.c
 
 The raw dataset and generated split CSVs are intentionally excluded from Git. The data-facing pages need `train.csv`, `validation.csv`, and `test.csv` at runtime; inference and evaluation also require a matching `fraud_model.joblib` and `evaluation_summary.json`. These are developer-only deployment prerequisites; visitors do not configure or upload them. The Methodology & Data page remains available if deployment data is unavailable.
 
-This app downloads anonymously from the public Hugging Face Hub dataset `BSaiCharan-HF/graphsentinel-data` on revision `main`. The repository must be public and ungated. Place the five files directly under the `processed/` directory:
+This app downloads anonymously from the public Hugging Face Hub dataset `BSaiCharan-HF/graphsentinel-data` on revision `main`. The repository must be public and ungated. Place the five files at the repository root:
 
 ```text
-processed/train.csv
-processed/validation.csv
-processed/test.csv
-processed/fraud_model.joblib
-processed/evaluation_summary.json
+train.csv
+validation.csv
+test.csv
+fraud_model.joblib
+evaluation_summary.json
 ```
 
-Do not upload `data/raw/creditcard.csv`. After artifact updates, run `python src/models/train_baseline.py` locally so the summary contains the SHA-256 checksum of its matching model file, then upload the model and summary together. Never edit the checksum by hand.
+The downloader stores/reuses the Hub snapshot in its cache and returns that snapshot directory to the existing loaders, which expect these filenames directly inside the resolved processed-artifact directory. Do not upload `data/raw/creditcard.csv`. After artifact updates, run `python src/models/train_baseline.py` locally so the summary contains the SHA-256 checksum of its matching model file, then upload the model and summary together. Never edit the checksum by hand.
 
-No Hugging Face token, Streamlit Secret, repository-ID input, or environment variable is required. The app calls the Hub snapshot downloader with `repo_type="dataset"` and explicitly disables authentication. It requests only the five `processed/...` paths, downloads large files into the Hugging Face cache, and reuses the cached snapshot and parsed model/predictions across reruns. It does not download the raw dataset or retrain. The split CSVs total roughly 155 MB, so the host needs adequate network transfer, disk cache, and memory to load and score them.
+No Hugging Face token, Streamlit Secret, repository-ID input, or environment variable is required. The app calls the Hub snapshot downloader with `repo_type="dataset"` and explicitly disables authentication. It requests only the five root-level files, downloads large files into the Hugging Face cache, and reuses the cached snapshot and parsed model/predictions across reruns. It does not download the raw dataset or retrain. The split CSVs total roughly 155 MB, so the host needs adequate network transfer, disk cache, and memory to load and score them.
 
-Before launch, the maintainer must ensure the Hugging Face repository is genuinely public and that the five files are present at the exact paths shown above. This source configuration is fixed in `src/data/artifact_store.py`; no app settings are needed. Reboot the Streamlit app after updating the dataset. If startup fails, application logs show the repository, failed remote path(s), and a safe error category. A 401/403 means Hugging Face is not allowing anonymous access; a missing-file diagnostic lists the expected `processed/...` paths. The public API currently returns 401 when queried without authentication, so public visibility and the remote listing still need confirmation before the hosted demo can be considered ready.
+Before launch, the maintainer must ensure the Hugging Face repository is genuinely public and that the five files are present at the exact root-level paths shown above. This source configuration is fixed in `src/data/artifact_store.py`; no app settings are needed. Reboot the Streamlit app after updating the dataset. If startup fails, application logs show the repository, failed remote path(s), and a safe error category. A 401/403 means Hugging Face is not allowing anonymous access; a missing-file diagnostic lists the expected root-level filenames.
 
 For local development only, complete local `data/processed/` files are used before downloading. `GRAPHSENTINEL_PROCESSED_DIR` can point to an alternate local processed-data directory; it is not required for the deployed demo.
 
