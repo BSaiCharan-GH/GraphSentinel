@@ -8,7 +8,6 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from streamlit.errors import StreamlitSecretNotFoundError
 from sklearn.metrics import (
     average_precision_score,
     confusion_matrix,
@@ -22,7 +21,7 @@ from src.graph.graph_builder import build_similarity_graph
 from src.data.artifact_store import (
     ArtifactStoreError,
     configuration_version,
-    configure_from_mapping,
+    configure_artifact_store,
 )
 from src.models.fraud_model import (
     build_evaluation_frame,
@@ -939,17 +938,7 @@ def render_methodology_data() -> None:
 
 def main() -> None:
     st.set_page_config(page_title="GraphSentinel | Fraud Intelligence", page_icon="🛡️", layout="wide")
-    configuration_error: str | None = None
-    try:
-        configure_from_mapping(st.secrets)
-    except StreamlitSecretNotFoundError:
-        configure_from_mapping({})
-    except (TypeError, ValueError) as error:
-        LOGGER.exception("Invalid GraphSentinel artifact configuration: %s", error)
-        configuration_error = (
-            "The demo’s transaction analysis is temporarily unavailable. "
-            "The Methodology & Data page remains available."
-        )
+    configure_artifact_store()
     st.markdown(
         """
         <style>
@@ -1020,11 +1009,8 @@ def main() -> None:
         key="main_navigation",
     )
 
-    if configuration_error:
-        initialization_error = configuration_error
-    else:
-        with st.spinner("Preparing the transaction risk demo…"):
-            initialization_error = initialize_demo_data(configuration_version())
+    with st.spinner("Preparing the transaction risk demo…"):
+        initialization_error = initialize_demo_data(configuration_version())
 
     if initialization_error:
         st.warning(initialization_error)

@@ -27,7 +27,7 @@ The dataset contains anonymized PCA-transformed features. It does not include re
 
 ## Local development setup (maintainer)
 
-Visitors to a deployed public demo only need its published Streamlit URL. Dataset access and secrets are configured once by the app owner; reviewers do not upload files, provide credentials, or run commands.
+Visitors to a deployed public demo only need its published Streamlit URL. The public dataset repository is configured in the application; reviewers do not upload files, provide credentials, or run commands.
 
 1. Create and activate the project virtual environment:
    python -m venv .venv
@@ -62,7 +62,7 @@ For a clean checkout, use the commands in that order after placing `creditcard.c
 
 The raw dataset and generated split CSVs are intentionally excluded from Git. The data-facing pages need `train.csv`, `validation.csv`, and `test.csv` at runtime; inference and evaluation also require a matching `fraud_model.joblib` and `evaluation_summary.json`. These are developer-only deployment prerequisites; visitors do not configure or upload them. The Methodology & Data page remains available if deployment data is unavailable.
 
-This app uses a private Hugging Face Hub **dataset repository** as external artifact storage. Upload only these files from `data/processed/`, preserving the `processed/` folder:
+This app downloads anonymously from the public Hugging Face Hub dataset `BSaiCharan-HF/graphsentinel-data` on revision `main`. The repository must be public and ungated. Place the five files directly under the `processed/` directory:
 
 ```text
 processed/train.csv
@@ -74,22 +74,13 @@ processed/evaluation_summary.json
 
 Do not upload `data/raw/creditcard.csv`. After artifact updates, run `python src/models/train_baseline.py` locally so the summary contains the SHA-256 checksum of its matching model file, then upload the model and summary together. Never edit the checksum by hand.
 
-As the app owner, configure the deployed Streamlit app once under **App settings → Secrets**:
+No Hugging Face token, Streamlit Secret, repository-ID input, or environment variable is required. The app calls the Hub snapshot downloader with `repo_type="dataset"` and explicitly disables authentication. It requests only the five `processed/...` paths, downloads large files into the Hugging Face cache, and reuses the cached snapshot and parsed model/predictions across reruns. It does not download the raw dataset or retrain. The split CSVs total roughly 155 MB, so the host needs adequate network transfer, disk cache, and memory to load and score them.
 
-```toml
-[artifacts]
-repo_id = "YOUR_HUGGING_FACE_ACCOUNT/graphsentinel-artifacts"
-token = "YOUR_READ_ONLY_HUGGING_FACE_TOKEN"
-revision = "main"
-```
+Before launch, the maintainer must ensure the Hugging Face repository is genuinely public and that the five files are present at the exact paths shown above. This source configuration is fixed in `src/data/artifact_store.py`; no app settings are needed. Reboot the Streamlit app after updating the dataset. If startup fails, application logs show the repository, failed remote path(s), and a safe error category. A 401/403 means Hugging Face is not allowing anonymous access; a missing-file diagnostic lists the expected `processed/...` paths. The public API currently returns 401 when queried without authentication, so public visibility and the remote listing still need confirmation before the hosted demo can be considered ready.
 
-`repo_id` should normally be `account/repository`; a dataset URL such as `https://huggingface.co/datasets/account/repository` is also accepted. Create a private dataset repository and a read-only token with access to it. Keep the token only in Streamlit Secrets; it is never shown in the application or committed to Git. The app downloads and validates the complete required artifact bundle on first startup, then reuses the Hugging Face Hub disk cache and Streamlit's in-process caches across reruns. It does not download the raw dataset or retrain. The three split CSVs total roughly 155 MB, so the host needs enough disk, network transfer, and memory to load and score them.
+For local development only, complete local `data/processed/` files are used before downloading. `GRAPHSENTINEL_PROCESSED_DIR` can point to an alternate local processed-data directory; it is not required for the deployed demo.
 
-After setting the secrets and uploading the artifact bundle, reboot the app once and review its logs. Successful first-load validation is required before the public demo is ready. If startup fails, the technical cause is written to application logs while visitors see a safe fallback instead of invented results.
-
-For local use, local `data/processed/` files are preferred. Alternatively set `GRAPHSENTINEL_PROCESSED_DIR` to a directory containing the five files above. `GRAPHSENTINEL_ARTIFACT_REPO`, `GRAPHSENTINEL_HF_TOKEN`, and `GRAPHSENTINEL_ARTIFACT_REVISION` may be used instead of Streamlit Secrets for non-Cloud environments.
-
-After pushing application changes, use **Manage app → Reboot** (or wait for repository sync/redeploy) in Streamlit Community Cloud. As the app owner, verify in the hosted app that Overview displays transaction statistics, Transaction Explorer displays records, Graph Intelligence renders inferred feature-similarity edges, Fraud Investigation loads cases and signed explanations, and Model Lab displays split-based metrics. If initialization fails, inspect app logs and verify the repository ID, read permission, revision, file paths, model checksum, and available memory. A successful local test does not itself verify the hosted deployment.
+After pushing application changes, use **Manage app → Reboot** (or wait for repository sync/redeploy) in Streamlit Community Cloud. Verify that Overview displays transaction statistics, Transaction Explorer displays records, Graph Intelligence renders inferred feature-similarity edges, Fraud Investigation loads cases and signed explanations, and Model Lab displays split-based metrics. Local tests do not verify that the public Hugging Face repository is accessible or that the hosted deployment succeeds.
 
 ## Repository structure
 

@@ -112,9 +112,12 @@ def test_threshold_selection_chooses_maximum_validation_f1() -> None:
 
 def test_missing_model_artifacts_do_not_trigger_implicit_training(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("GRAPHSENTINEL_PROCESSED_DIR", str(tmp_path / "processed"))
-    monkeypatch.delenv("GRAPHSENTINEL_ARTIFACT_REPO", raising=False)
-    monkeypatch.delenv("GRAPHSENTINEL_HF_TOKEN", raising=False)
-    with pytest.raises(FileNotFoundError, match=r"\[artifacts\]\.repo_id"):
+    monkeypatch.setattr(
+        artifact_store,
+        "_download_snapshot",
+        lambda *args: tmp_path / "remote" / "processed",
+    )
+    with pytest.raises(artifact_store.ArtifactStoreError, match="processed/evaluation_summary.json"):
         fraud_model.load_trained_model()
 
 
@@ -125,23 +128,13 @@ def test_configured_external_artifact_directory_is_used(
     remote_processed = tmp_path / "remote" / "processed"
     remote_processed.mkdir(parents=True)
     (remote_processed / "train.csv").write_text("Class\n0\n1\n", encoding="utf-8")
-    monkeypatch.setattr(artifact_store, "_artifact_repo_id", None)
-    monkeypatch.setattr(artifact_store, "_artifact_token", None)
-    monkeypatch.setattr(artifact_store, "_artifact_revision", None)
     monkeypatch.setattr(artifact_store, "_artifact_local_dir", None)
     monkeypatch.setenv("GRAPHSENTINEL_PROCESSED_DIR", str(tmp_path / "local"))
-    artifact_store.configure_from_mapping(
-        {
-            "artifacts": {
-                "repo_id": "https://huggingface.co/datasets/example/private-dataset",
-                "token": "not-a-real-token",
-            }
-        }
-    )
+    artifact_store.configure_artifact_store()
     monkeypatch.setattr(
         artifact_store,
         "_download_snapshot",
-        lambda repo_id, revision, token, required: remote_processed,
+        lambda repo_id, revision, required: remote_processed,
     )
 
     resolved = artifact_store.resolve_processed_dir(["train.csv"])
@@ -167,15 +160,13 @@ def test_external_artifact_download_is_cached(
     artifact_store._download_snapshot_cached.cache_clear()
     try:
         first = artifact_store._download_snapshot(
-            "example/private-dataset",
+            artifact_store.PUBLIC_DATASET_REPO_ID,
             "main",
-            "test-token",
             ("train.csv",),
         )
         second = artifact_store._download_snapshot(
-            "example/private-dataset",
+            artifact_store.PUBLIC_DATASET_REPO_ID,
             "main",
-            "test-token",
             ("train.csv",),
         )
     finally:
@@ -185,9 +176,47 @@ def test_external_artifact_download_is_cached(
     assert len(calls) == 1
     assert calls[0]["repo_type"] == "dataset"
     assert calls[0]["allow_patterns"] == ["processed/train.csv"]
+    assert calls[0]["token"] is False
+    assert calls[0]["repo_id"] == artifact_store.PUBLIC_DATASET_REPO_ID
 
 
-def test_authentication_failure_has_safe_actionable_diagnostic(
+def test_runtime_artifact_bundle_uses_exact_public_dataset_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import huggingface_hub
+
+    request: dict[str, object] = {}
+    remote_processed = tmp_path / "snapshot" / "processed"
+    remote_processed.mkdir(parents=True)
+    for filename in fraud_model.RUNTIME_REQUIRED_FILENAMES:
+        (remote_processed / filename).write_bytes(b"artifact")
+
+    def fake_snapshot_download(**kwargs: object) -> str:
+        request.update(kwargs)
+        return str(tmp_path / "snapshot")
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_snapshot_download)
+    monkeypatch.setenv("GRAPHSENTINEL_PROCESSED_DIR", str(tmp_path / "local"))
+    artifact_store._download_snapshot_cached.cache_clear()
+
+    resolved = artifact_store.resolve_processed_dir(
+        fraud_model.RUNTIME_REQUIRED_FILENAMES
+    )
+
+    assert resolved == remote_processed
+    assert request["repo_id"] == "BSaiCharan-HF/graphsentinel-data"
+    assert request["repo_type"] == "dataset"
+    assert request["revision"] == "main"
+    assert request["token"] is False
+    assert set(request["allow_patterns"]) == {
+        f"processed/{filename}"
+        for filename in fraud_model.RUNTIME_REQUIRED_FILENAMES
+    }
+    artifact_store._download_snapshot_cached.cache_clear()
+
+
+def test_private_or_unavailable_public_repo_has_safe_diagnostic(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import huggingface_hub
@@ -199,6 +228,7 @@ def test_authentication_failure_has_safe_actionable_diagnostic(
     )
 
     def denied_download(**kwargs: object) -> str:
+        assert kwargs["token"] is False
         raise HfHubHTTPError("unauthorized", response=response)
 
     monkeypatch.setattr(huggingface_hub, "snapshot_download", denied_download)
@@ -206,16 +236,14 @@ def test_authentication_failure_has_safe_actionable_diagnostic(
 
     with pytest.raises(artifact_store.ArtifactStoreError) as error:
         artifact_store._download_snapshot(
-            "example/private-dataset",
+            artifact_store.PUBLIC_DATASET_REPO_ID,
             "main",
-            "never-log-this-token",
             ("train.csv",),
         )
 
     message = str(error.value)
-    assert "denied access" in message
+    assert "denied anonymous access" in message
     assert "processed/train.csv" in message
-    assert "never-log-this-token" not in message
     assert error.value.__cause__ is None
     artifact_store._download_snapshot_cached.cache_clear()
 
@@ -224,9 +252,6 @@ def test_missing_remote_files_report_expected_paths(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(artifact_store, "_artifact_repo_id", "example/private-dataset")
-    monkeypatch.setattr(artifact_store, "_artifact_token", "test-token")
-    monkeypatch.setattr(artifact_store, "_artifact_revision", "main")
     monkeypatch.setenv("GRAPHSENTINEL_PROCESSED_DIR", str(tmp_path / "local"))
     monkeypatch.setattr(
         artifact_store,
@@ -238,38 +263,29 @@ def test_missing_remote_files_report_expected_paths(
         artifact_store.resolve_processed_dir(["train.csv"])
 
 
-def test_missing_private_repository_token_is_rejected() -> None:
-    with pytest.raises(ValueError, match=r"\[artifacts\]\.token is missing"):
-        artifact_store.configure_from_mapping(
-            {"artifacts": {"repo_id": "example/private-dataset"}}
-        )
-
-
 def test_configuration_change_invalidates_download_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import huggingface_hub
 
-    monkeypatch.delenv("GRAPHSENTINEL_ARTIFACT_REPO", raising=False)
-    monkeypatch.delenv("GRAPHSENTINEL_HF_TOKEN", raising=False)
-    monkeypatch.delenv("GRAPHSENTINEL_ARTIFACT_REVISION", raising=False)
-    monkeypatch.setattr(artifact_store, "_artifact_repo_id", None)
-    monkeypatch.setattr(artifact_store, "_artifact_token", None)
-    monkeypatch.setattr(artifact_store, "_artifact_revision", None)
     monkeypatch.setattr(artifact_store, "_artifact_local_dir", None)
     monkeypatch.setattr(
         huggingface_hub,
         "snapshot_download",
         lambda **kwargs: str(artifact_store.PROJECT_ROOT),
     )
-    artifact_store.configure_artifact_store("example/first", "token-one", "main")
+    artifact_store._download_snapshot_cached.cache_clear()
+    artifact_store.configure_artifact_store()
     artifact_store._download_snapshot_cached(
-        "example/first", "main", "token-one", ("train.csv",)
+        artifact_store.PUBLIC_DATASET_REPO_ID,
+        artifact_store.PUBLIC_DATASET_REVISION,
+        ("train.csv",),
     )
     assert artifact_store._download_snapshot_cached.cache_info().currsize == 1
     previous_version = artifact_store.configuration_version()
 
-    artifact_store.configure_artifact_store("example/second", "token-two", "main")
+    monkeypatch.setenv("GRAPHSENTINEL_PROCESSED_DIR", "new-artifact-path")
+    artifact_store.configure_artifact_store()
 
     assert artifact_store.configuration_version() == previous_version + 1
     assert artifact_store._download_snapshot_cached.cache_info().currsize == 0
@@ -279,16 +295,13 @@ def test_processed_directory_change_invalidates_app_initialization_cache(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(artifact_store, "_artifact_repo_id", None)
-    monkeypatch.setattr(artifact_store, "_artifact_token", None)
-    monkeypatch.setattr(artifact_store, "_artifact_revision", None)
     monkeypatch.setattr(artifact_store, "_artifact_local_dir", None)
     monkeypatch.setenv("GRAPHSENTINEL_PROCESSED_DIR", str(tmp_path / "first"))
-    artifact_store.configure_from_mapping({})
+    artifact_store.configure_artifact_store()
     first_version = artifact_store.configuration_version()
 
     monkeypatch.setenv("GRAPHSENTINEL_PROCESSED_DIR", str(tmp_path / "second"))
-    artifact_store.configure_from_mapping({})
+    artifact_store.configure_artifact_store()
 
     assert artifact_store.configuration_version() == first_version + 1
 
@@ -300,19 +313,6 @@ def test_relative_processed_directory_is_resolved_from_project_root(
     assert artifact_store._configured_local_dir() == (
         artifact_store.PROJECT_ROOT / "deployment-data"
     ).resolve()
-
-
-@pytest.mark.parametrize(
-    "repo_id",
-    [
-        "https://example.com/datasets/owner/repo",
-        "https://huggingface.co/owner/repo",
-        "https://huggingface.co/datasets/owner/repo/tree/main",
-    ],
-)
-def test_invalid_hugging_face_repository_urls_are_rejected(repo_id: str) -> None:
-    with pytest.raises(ValueError, match="owner/repository or a dataset URL"):
-        artifact_store.configure_artifact_store(repo_id=repo_id)
 
 
 def test_evaluation_summary_matches_current_test_split(trained_artifacts: None) -> None:
