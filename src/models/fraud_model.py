@@ -242,17 +242,27 @@ def load_trained_model(
         ) from exc
     try:
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError(
             f"Could not read evaluation summary at {summary_path}. "
             "Verify evaluation_summary.json and retrain the baseline if it is corrupted."
         ) from exc
+    if not isinstance(loaded, dict) or not isinstance(summary, dict):
+        raise ValueError(
+            "Model artifact and evaluation summary must contain JSON-compatible mappings. "
+            "Upload the matching fraud_model.joblib and evaluation_summary.json."
+        )
     if "model" not in loaded or "scaler" not in loaded or "threshold" not in loaded:
         raise ValueError(f"Model artifact at {model_path} is incomplete. Retrain the baseline model.")
     model = loaded["model"]
     scaler = loaded["scaler"]
     feature_columns = summary.get("feature_columns", [])
-    if not feature_columns:
+    if (
+        not isinstance(feature_columns, list)
+        or not feature_columns
+        or not all(isinstance(column, str) for column in feature_columns)
+        or len(set(feature_columns)) != len(feature_columns)
+    ):
         raise ValueError("Evaluation summary has no feature schema. Retrain the baseline model.")
     expected_count = len(feature_columns)
     if (
@@ -267,8 +277,13 @@ def load_trained_model(
     ):
         if fitted_names is not None and list(fitted_names) != feature_columns:
             raise ValueError("Model feature ordering does not match its evaluation summary.")
-    artifact_threshold = float(loaded["threshold"])
-    summary_threshold = float(summary.get("selected_threshold", float("nan")))
+    try:
+        artifact_threshold = float(loaded["threshold"])
+        summary_threshold = float(summary.get("selected_threshold", float("nan")))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Model and evaluation summary must contain numeric selected thresholds."
+        ) from exc
     if not np.isfinite(artifact_threshold) or artifact_threshold != summary_threshold:
         raise ValueError("Model threshold does not match its evaluation summary. Retrain the baseline model.")
     expected_hash = summary.get("model_sha256")

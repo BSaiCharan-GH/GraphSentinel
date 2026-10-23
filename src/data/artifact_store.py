@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, Mapping
@@ -12,7 +13,9 @@ LOCAL_PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 _artifact_repo_id: str | None = None
 _artifact_token: str | None = None
 _artifact_revision: str | None = None
+_artifact_local_dir: str | None = None
 _configuration_version = 0
+_DOWNLOAD_LOCK = threading.Lock()
 
 
 class ArtifactStoreError(FileNotFoundError):
@@ -22,7 +25,13 @@ class ArtifactStoreError(FileNotFoundError):
 def _normalize_repo_id(repo_id: str) -> str:
     value = repo_id.strip()
     if not value.startswith(("https://", "http://")):
-        return value.strip("/")
+        repo_parts = value.strip("/").split("/")
+        if len(repo_parts) != 2 or not all(repo_parts):
+            raise ValueError(
+                "Hugging Face repo_id must use owner/repository format, "
+                "for example BSaiCharan-HF/graphsentinel-data."
+            )
+        return "/".join(repo_parts)
 
     parsed = urlparse(value)
     path_parts = [part for part in parsed.path.split("/") if part]
@@ -43,18 +52,32 @@ def configure_artifact_store(
     token: str | None = None,
     revision: str | None = None,
 ) -> None:
-    global _artifact_repo_id, _artifact_token, _artifact_revision, _configuration_version
+    global _artifact_repo_id, _artifact_token, _artifact_revision
+    global _artifact_local_dir, _configuration_version
     configured_repo_id = repo_id or os.getenv("GRAPHSENTINEL_ARTIFACT_REPO")
+    local_dir = _configured_local_dir()
     next_configuration = (
         _normalize_repo_id(configured_repo_id) if configured_repo_id else None,
         token or os.getenv("GRAPHSENTINEL_HF_TOKEN"),
         revision or os.getenv("GRAPHSENTINEL_ARTIFACT_REVISION"),
+        str(local_dir) if local_dir else None,
     )
-    current_configuration = (_artifact_repo_id, _artifact_token, _artifact_revision)
-    if next_configuration != current_configuration:
-        _artifact_repo_id, _artifact_token, _artifact_revision = next_configuration
-        _configuration_version += 1
-        _download_snapshot.cache_clear()
+    with _DOWNLOAD_LOCK:
+        current_configuration = (
+            _artifact_repo_id,
+            _artifact_token,
+            _artifact_revision,
+            _artifact_local_dir,
+        )
+        if next_configuration != current_configuration:
+            (
+                _artifact_repo_id,
+                _artifact_token,
+                _artifact_revision,
+                _artifact_local_dir,
+            ) = next_configuration
+            _configuration_version += 1
+            _download_snapshot_cached.cache_clear()
 
 
 def configuration_version() -> int:
@@ -72,7 +95,7 @@ def _configured_local_dir() -> Path | None:
 
 
 @lru_cache(maxsize=1)
-def _download_snapshot(
+def _download_snapshot_cached(
     repo_id: str,
     revision: str | None,
     token: str | None,
@@ -80,12 +103,43 @@ def _download_snapshot(
 ) -> Path:
     try:
         from huggingface_hub import snapshot_download
-        from huggingface_hub.errors import EntryNotFoundError, RevisionNotFoundError
+        from huggingface_hub import errors as hub_errors
     except ImportError as exc:
         raise ArtifactStoreError(
             "External artifact storage is configured, but huggingface_hub is not installed. "
             "Install project dependencies from requirements.txt."
-        ) from exc
+        ) from None
+
+    expected_hub_errors = (
+        "EntryNotFoundError",
+        "FileMetadataError",
+        "GatedRepoError",
+        "HfHubHTTPError",
+        "IncompleteSnapshotError",
+        "LocalEntryNotFoundError",
+        "RepositoryNotFoundError",
+        "RevisionNotFoundError",
+        "XetDownloadError",
+    )
+    hub_error_types = tuple(
+        error_type
+        for error_name in expected_hub_errors
+        if isinstance((error_type := getattr(hub_errors, error_name, None)), type)
+    )
+    handled_error_types = hub_error_types + (OSError, TypeError, ValueError)
+    def available_error_types(*names: str) -> tuple[type[BaseException], ...]:
+        return tuple(
+            error_type
+            for name in names
+            if isinstance((error_type := getattr(hub_errors, name, None)), type)
+        )
+
+    entry_not_found = available_error_types("EntryNotFoundError")
+    gated_repo = available_error_types("GatedRepoError")
+    repository_not_found = available_error_types(
+        "RepositoryNotFoundError",
+        "RevisionNotFoundError",
+    )
 
     try:
         snapshot = snapshot_download(
@@ -95,13 +149,45 @@ def _download_snapshot(
             token=token,
             allow_patterns=[f"processed/{name}" for name in required_files],
         )
-    except (EntryNotFoundError, RevisionNotFoundError, OSError, ValueError) as exc:
+    except handled_error_types as exc:
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        if status_code in {401, 403} or isinstance(exc, gated_repo):
+            reason = (
+                "Hugging Face denied access. Verify the private dataset repository ID "
+                "and that the configured read token has access."
+            )
+        elif isinstance(exc, entry_not_found):
+            reason = (
+                "The requested files or revision were not found. Verify that every file "
+                "exists under the exact processed/ paths listed below."
+            )
+        elif isinstance(exc, repository_not_found):
+            reason = (
+                "The dataset repository or revision was not found or is not visible to "
+                "the configured token. Verify the owner/repository ID and revision."
+            )
+        else:
+            reason = (
+                "The Hub download failed. Check the repository, token permissions, "
+                "revision, network availability, and available disk space."
+            )
+        expected_paths = ", ".join(f"processed/{name}" for name in required_files)
         raise ArtifactStoreError(
-            "Could not load GraphSentinel artifacts from the configured Hugging Face "
-            f"dataset repository '{repo_id}'. Check the repository ID, token permissions, "
-            "revision, and network availability in Streamlit Secrets."
-        ) from exc
-    return Path(snapshot) / "processed"
+            f"Could not download GraphSentinel artifacts from dataset '{repo_id}' "
+            f"(revision '{revision or 'default'}'). {reason} Expected remote paths: "
+            f"{expected_paths}. Failure type: {type(exc).__name__}."
+        ) from None
+    return Path(snapshot).resolve() / "processed"
+
+
+def _download_snapshot(
+    repo_id: str,
+    revision: str | None,
+    token: str | None,
+    required_files: tuple[str, ...],
+) -> Path:
+    with _DOWNLOAD_LOCK:
+        return _download_snapshot_cached(repo_id, revision, token, required_files)
 
 
 def resolve_processed_dir(required_files: Iterable[str] = ()) -> Path:
@@ -117,13 +203,29 @@ def resolve_processed_dir(required_files: Iterable[str] = ()) -> Path:
     if repo_id:
         repo_id = _normalize_repo_id(repo_id)
         snapshot_dir = _download_snapshot(repo_id, revision, token, required)
-        missing = [name for name in required if not (snapshot_dir / name).is_file()]
+        missing = [
+            f"processed/{name}"
+            for name in required
+            if not (snapshot_dir / name).is_file()
+        ]
         if not missing:
+            empty = [
+                path
+                for path in required
+                if (snapshot_dir / path).stat().st_size == 0
+            ]
+            if empty:
+                raise ArtifactStoreError(
+                    "Downloaded artifacts are empty at: "
+                    + ", ".join(f"processed/{name}" for name in empty)
+                    + f" in dataset '{repo_id}'. Re-upload complete files."
+                )
             return snapshot_dir
         raise ArtifactStoreError(
-            "The configured artifact repository is missing required files: "
+            f"Dataset '{repo_id}' is missing required remote paths: "
             + ", ".join(missing)
-            + ". Upload the files under its processed/ directory."
+            + ". Upload each file at exactly the listed path (do not nest another "
+            "processed/ directory)."
         )
 
     missing = [name for name in required if not (local_dir / name).is_file()]
@@ -131,8 +233,16 @@ def resolve_processed_dir(required_files: Iterable[str] = ()) -> Path:
         raise FileNotFoundError(
             f"Required GraphSentinel files are missing from {local_dir}: "
             + ", ".join(missing)
-            + ". Add a local processed-data directory with GRAPHSENTINEL_PROCESSED_DIR "
-            "or configure the private Hugging Face dataset repository in Streamlit Secrets."
+            + ". For Streamlit Cloud, set [artifacts].repo_id and [artifacts].token "
+            "in App settings → Secrets. Expected remote paths: "
+            + ", ".join(f"processed/{name}" for name in missing)
+            + "."
+        )
+    empty = [name for name in required if (local_dir / name).stat().st_size == 0]
+    if empty:
+        raise ArtifactStoreError(
+            f"Required GraphSentinel files are empty in {local_dir}: "
+            + ", ".join(empty)
         )
     return local_dir
 
@@ -142,8 +252,15 @@ def configure_from_mapping(secrets: Mapping[str, object]) -> None:
     values = secrets.get("artifacts", {})
     if not isinstance(values, Mapping):
         raise ValueError("Streamlit Secrets [artifacts] must be a table.")
+    repo_id = values.get("repo_id")
+    token = values.get("token")
+    if repo_id and not token:
+        raise ValueError(
+            "Streamlit Secrets [artifacts].token is missing. Add a read-only token "
+            "with access to the private Hugging Face dataset."
+        )
     configure_artifact_store(
-        repo_id=str(values["repo_id"]) if values.get("repo_id") else None,
-        token=str(values["token"]) if values.get("token") else None,
+        repo_id=str(repo_id) if repo_id else None,
+        token=str(token) if token else None,
         revision=str(values["revision"]) if values.get("revision") else None,
     )

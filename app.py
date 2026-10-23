@@ -84,6 +84,7 @@ def initialize_demo_data(config_version: int) -> str | None:
         ArtifactStoreError,
         FileNotFoundError,
         ValueError,
+        TypeError,
         OSError,
         ImportError,
         pd.errors.ParserError,
