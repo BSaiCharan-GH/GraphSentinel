@@ -7,7 +7,7 @@ from unittest.mock import Mock
 import numpy as np
 import pandas as pd
 import pytest
-from huggingface_hub.errors import HfHubHTTPError
+from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError
 from sklearn.linear_model import LogisticRegression
 
 from src.data import artifact_store
@@ -245,6 +245,42 @@ def test_private_or_unavailable_public_repo_has_safe_diagnostic(
     assert "denied anonymous access" in message
     assert "train.csv" in message
     assert error.value.__cause__ is None
+    artifact_store._download_snapshot_cached.cache_clear()
+
+
+def test_repository_not_found_diagnostic_does_not_assume_private_repo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import huggingface_hub
+    import httpx2
+
+    response = httpx2.Response(
+        status_code=401,
+        request=httpx2.Request(
+            "GET",
+            "https://huggingface.co/api/datasets/example/missing-dataset",
+        ),
+    )
+
+    def missing_repository(**kwargs: object) -> str:
+        assert kwargs["token"] is False
+        raise RepositoryNotFoundError("repository not found", response=response)
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", missing_repository)
+    artifact_store._download_snapshot_cached.cache_clear()
+
+    with pytest.raises(artifact_store.ArtifactStoreError) as error:
+        artifact_store._download_snapshot(
+            artifact_store.PUBLIC_DATASET_REPO_ID,
+            "main",
+            ("train.csv",),
+        )
+
+    message = str(error.value)
+    assert "could not resolve the dataset repository or revision" in message
+    assert "Verify the exact repository ID" in message
+    assert "denied anonymous access" not in message
+    assert "train.csv" in message
     artifact_store._download_snapshot_cached.cache_clear()
 
 

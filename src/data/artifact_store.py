@@ -118,20 +118,21 @@ def _download_snapshot_cached(
         )
     except handled_error_types as exc:
         status_code = getattr(getattr(exc, "response", None), "status_code", None)
-        if status_code in {401, 403} or isinstance(exc, gated_repo):
+        if isinstance(exc, repository_not_found):
             reason = (
-                "Hugging Face denied anonymous access. The dataset must be public and "
-                "ungated for token-free downloads."
+                "Hugging Face could not resolve the dataset repository or revision. "
+                "Verify the exact repository ID, dataset repository type, and revision; "
+                "also confirm the repository is publicly accessible."
             )
         elif isinstance(exc, entry_not_found):
             reason = (
                 "The requested files or revision were not found. Verify that every file "
                 "exists at the repository root at the exact paths listed below."
             )
-        elif isinstance(exc, repository_not_found):
+        elif status_code in {401, 403} or isinstance(exc, gated_repo):
             reason = (
-                "The public dataset repository or revision was not found. Verify the "
-                "configured repository ID and revision."
+                "Hugging Face denied anonymous access. Confirm the repository is public "
+                "and ungated for token-free downloads."
             )
         else:
             reason = (
