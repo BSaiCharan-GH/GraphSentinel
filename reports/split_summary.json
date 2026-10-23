@@ -1,0 +1,28 @@
+{
+  "random_seed": 42,
+  "split_strategy": "stratified random split",
+  "split_sizes": {
+    "train.csv": {
+      "rows": 199364,
+      "fraud_cases": 344,
+      "legitimate_cases": 199020,
+      "fraud_rate_percent": 0.172549,
+      "path": "data\\processed\\train.csv"
+    },
+    "validation.csv": {
+      "rows": 42721,
+      "fraud_cases": 74,
+      "legitimate_cases": 42647,
+      "fraud_rate_percent": 0.173217,
+      "path": "data\\processed\\validation.csv"
+    },
+    "test.csv": {
+      "rows": 42722,
+      "fraud_cases": 74,
+      "legitimate_cases": 42648,
+      "fraud_rate_percent": 0.173213,
+      "path": "data\\processed\\test.csv"
+    }
+  },
+  "warning": "Random stratification is a baseline protocol. Time-based evaluation may be needed to assess deployment realism."
+}

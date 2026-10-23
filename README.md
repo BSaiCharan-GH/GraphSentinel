@@ -1,0 +1,57 @@
+﻿# GraphSentinel for Razorpay
+
+GraphSentinel is an explainable fraud-intelligence console for payment-risk analysis. The project uses the public ULB credit-card fraud dataset, builds a tabular fraud-detection baseline, and surfaces model confidence, graph-based similarity relationships, and investigation workflows in a Streamlit dashboard.
+
+## Product goals
+
+- Validate the public dataset and produce reproducible splits.
+- Train and evaluate a fraud baseline without fabricating real payment activity.
+- Present explainable alerts and transaction-level evidence.
+- Construct a defensible similarity graph from transaction features only.
+- Deliver a polished, portfolio-ready dashboard for analysis and review.
+
+## Dataset
+
+ULB / Worldline Credit Card Fraud Detection dataset:
+https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud
+
+Expected file: data/raw/creditcard.csv
+
+Expected columns:
+- Time
+- V1 through V28
+- Amount
+- Class
+
+The dataset contains anonymized PCA-transformed features. It does not include real customers, merchants, cards, or payment network edges, so any graph is explicitly treated as an inferred analytical relationship rather than a real-world payment graph.
+
+## Setup
+
+1. Create and activate the project virtual environment.
+2. Install dependencies:
+   pip install -r requirements.txt
+3. Validate the raw dataset:
+   python src/data/validate_dataset.py
+4. Create train/validation/test splits:
+   python src/data/split_dataset.py
+5. Train the fraud baseline:
+   python src/models/train_baseline.py
+6. Launch the dashboard:
+   streamlit run app.py
+
+## Repository structure
+
+- app.py — Streamlit dashboard entry point
+- src/data/validate_dataset.py — dataset quality validation
+- src/data/split_dataset.py — stratified split generation
+- src/models/fraud_model.py — baseline model logic and evaluation
+- src/models/train_baseline.py — model training command
+- src/graph/graph_builder.py — similarity graph construction
+- reports/ — validation and split summaries
+- data/processed/ — generated train/validation/test CSVs and model artifacts
+
+## Notes
+
+- This project does not connect to Razorpay live infrastructure.
+- No customer or merchant identities are inferred from the dataset.
+- Model scores should be interpreted as risk signals for analysis, not as proof of fraud.
