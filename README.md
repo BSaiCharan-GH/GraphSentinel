@@ -1,4 +1,4 @@
-﻿# GraphSentinel for Razorpay
+﻿# GraphSentinel for payment risk analysis
 
 GraphSentinel is an explainable fraud-intelligence console for payment-risk analysis. The project uses the public ULB credit-card fraud dataset, builds a tabular fraud-detection baseline, and surfaces model confidence, graph-based similarity relationships, and investigation workflows in a Streamlit dashboard.
 
